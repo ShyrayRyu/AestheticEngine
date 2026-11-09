@@ -1,0 +1,75 @@
+# =============================================================================
+# AestheticEngine - Orchestration Docker Compose (Linux / Conteneur LXC)
+# =============================================================================
+# Ce fichier orchestre :
+#   1. backend  : API Python FastAPI + FFmpeg + MoviePy + Librosa
+#   2. frontend : Interface Vue 3 + Vite + TypeScript + Tailwind CSS
+#   3. Accès transparent à l'instance Ollama locale de l'hôte via host-gateway
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # SERVICE BACKEND : FastAPI + Moteur Audio/Vidéo + Client Ollama
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: aesthetic-engine-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # URL d'accès à Ollama tournant en local sur la machine hôte (ou LXC)
+      # Sur Linux, host.docker.internal est résolu grâce à extra_hosts ci-dessous
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-llava:latest}
+      # Paramètres métiers par défaut
+      - MIN_EFFORT_SCORE=${MIN_EFFORT_SCORE:-7.0}
+      - STORAGE_DIR=/app/storage
+      - LUT_DIR=/app/assets/luts
+      - CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000
+    volumes:
+      # Persistance des rushs uploadés, fichiers temporaires et rendus finaux
+      - ./backend/storage:/app/storage
+      # Dossier contenant les LUTs (.cube) pour l'étalonnage Dark Aesthetic
+      - ./backend/assets/luts:/app/assets/luts
+      # Montage du code en développement pour le hot-reload Uvicorn
+      - ./backend/app:/app/app
+    # Permet au conteneur Docker sous Linux/LXC de communiquer avec le port 11434
+    # (Ollama) de la machine hôte via le nom DNS "host.docker.internal"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - aesthetic-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # SERVICE FRONTEND : Vue 3 + Vite + TypeScript + Tailwind CSS (Shadcn-vue)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: aesthetic-engine-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8000}
+      - VITE_WS_BASE_URL=${VITE_WS_BASE_URL:-ws://localhost:8000}
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    depends_on:
+      - backend
+    networks:
+      - aesthetic-net
+
+networks:
+  aesthetic-net:
+    driver: bridge

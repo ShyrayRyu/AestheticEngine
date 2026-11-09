@@ -1,0 +1,27 @@
+# =============================================================================
+# Dépendances Backend - AestheticEngine
+# =============================================================================
+# Framework Web & Validation
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.4
+pydantic-settings==2.7.0
+aiofiles==24.1.0
+
+# Client HTTP asynchrone pour l'API locale Ollama (LLaVA)
+httpx==0.28.1
+
+# Traitement Audio (BPM, Onset Envelope, Spectral Flux, Beat Drops)
+librosa==0.10.2.post1
+soundfile==0.13.0
+numpy==1.26.4
+scipy==1.14.1
+
+# Traitement Vidéo & Image
+moviepy==1.0.3
+imageio==2.36.1
+imageio-ffmpeg==0.5.1
+opencv-python-headless==4.10.0.84
+pillow==10.4.0
+proglog==0.1.10
