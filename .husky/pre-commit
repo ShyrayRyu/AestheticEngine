@@ -1,0 +1,4 @@
+# Vérification syntaxique Python sur le backend avant chaque commit
+if [ -d "backend/app" ]; then
+  find backend/app -name "*.py" -exec python3 -m py_compile {} +
+fi

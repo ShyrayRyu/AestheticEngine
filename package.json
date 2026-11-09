@@ -1,0 +1,25 @@
+{
+  "name": "aesthetic-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Full-stack automated TikTok bodybuilding & posing video editor (Vue 3 + FastAPI + Librosa + Ollama + FFmpeg)",
+  "scripts": {
+    "prepare": "husky",
+    "commit": "cz",
+    "commitlint": "commitlint --from HEAD~1 --to HEAD --verbose",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build"
+  },
+  "config": {
+    "commitizen": {
+      "path": "./node_modules/cz-conventional-changelog"
+    }
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.6.0",
+    "@commitlint/config-conventional": "^19.6.0",
+    "commitizen": "^4.3.1",
+    "cz-conventional-changelog": "^3.3.0",
+    "husky": "^9.1.7"
+  }
+}

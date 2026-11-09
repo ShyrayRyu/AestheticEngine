@@ -1,0 +1,28 @@
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Stockage dynamique des vidéos uploadées et exports
+backend/storage/uploads/*
+!backend/storage/uploads/.gitkeep
+backend/storage/temp/*
+!backend/storage/temp/.gitkeep
+backend/storage/exports/*
+!backend/storage/exports/.gitkeep
+
+# Environnement & IDE
+.env
+.DS_Store
+.vscode/
+.idea/
