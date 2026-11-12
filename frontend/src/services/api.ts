@@ -14,12 +14,13 @@ export const WS_BASE_URL =
   import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8000'
 
 /**
- * Envoie les rushs vidéo (.mp4) et la piste audio optionnelle (.mp3/.wav) au backend via Multipart FormData.
- * Si `audio` est null, le montage s'effectue sans musique avec le son de la vidéo coupé à 0.
+ * Envoie les rushs vidéo (.mp4), la piste audio optionnelle (.mp3/.wav) et la vidéo
+ * d'inspiration optionnelle (.mp4) au backend via Multipart FormData.
  */
 export async function uploadProjectMedia(
   videos: File[],
-  audio?: File | null
+  audio?: File | null,
+  inspiration?: File | null
 ): Promise<UploadResponse> {
   const formData = new FormData()
   for (const video of videos) {
@@ -27,6 +28,9 @@ export async function uploadProjectMedia(
   }
   if (audio) {
     formData.append('audio', audio)
+  }
+  if (inspiration) {
+    formData.append('inspiration', inspiration)
   }
 
   const response = await fetch(`${API_BASE_URL}/api/v1/projects/upload`, {

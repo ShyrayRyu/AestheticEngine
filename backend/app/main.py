@@ -43,6 +43,7 @@ from app.models.schemas import (
 from app.services.audio_analyzer import AudioBeatDropAnalyzer
 from app.services.color_grading import DarkAestheticColorGrader
 from app.services.edl_exporter import PremiereResolveXMLExporter
+from app.services.inspiration_analyzer import InspirationVideoAnalyzer
 from app.services.video_editor import SpeedRampVideoEditor
 from app.services.vision_scorer import OllamaVisionScorer
 
@@ -125,7 +126,11 @@ async def upload_project_media(
     ),
     audio: Optional[UploadFile] = File(
         default=None,
-        description="Piste musicale optionnelle (.mp3, .wav, .m4a). Si omise, montage muet (son vidéo à 0).",
+        description="Piste musicale optionnelle (.mp3, .wav, .m4a). Si omise, montage muet ou son de l'inspiration.",
+    ),
+    inspiration: Optional[UploadFile] = File(
+        default=None,
+        description="Vidéo TikTok d'inspiration optionnelle (.mp4, .mov) pour cloner le format, le rythme des cuts et la musique.",
     ),
 ) -> UploadResponse:
     if not videos:
@@ -135,8 +140,10 @@ async def upload_project_media(
     project_upload_dir = settings.uploads_dir / project_id
     videos_dir = project_upload_dir / "videos"
     audio_dir = project_upload_dir / "audio"
+    inspiration_dir = project_upload_dir / "inspiration"
     videos_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(parents=True, exist_ok=True)
+    inspiration_dir.mkdir(parents=True, exist_ok=True)
 
     saved_video_names: List[str] = []
     allowed_video_exts = {".mp4", ".mov", ".mkv", ".webm"}
@@ -163,11 +170,30 @@ async def upload_project_media(
         with dest_audio_path.open("wb") as buffer:
             shutil.copyfileobj(audio.file, buffer)
 
+    inspiration_name: Optional[str] = None
+    if inspiration is not None and inspiration.filename:
+        inspiration_name = Path(inspiration.filename).name
+        dest_insp_path = inspiration_dir / inspiration_name
+        with dest_insp_path.open("wb") as buffer:
+            shutil.copyfileobj(inspiration.file, buffer)
+
     audio_status_msg = (
         f"piste '{audio_name}'"
         if audio_name
-        else "mode sans musique (son vidéo coupé à 0)"
+        else (
+            f"inspiration '{inspiration_name}'"
+            if inspiration_name
+            else "mode sans musique (son vidéo coupé à 0)"
+        )
     )
+
+    logs = [f"[UPLOAD] Projet #{project_id} créé avec {len(saved_video_names)} rush(s) vidéo."]
+    if inspiration_name:
+        logs.append(f"[INSPIRATION] Vidéo de référence chargée : {inspiration_name}")
+    if audio_name:
+        logs.append(f"[UPLOAD] Piste audio chargée : {audio_name}")
+    elif not inspiration_name:
+        logs.append("[UPLOAD] Aucune musique sélectionnée → Montage sans musique (son vidéo forcé à 0).")
 
     PROJECTS_STATE[project_id] = ProjectStatusResponse(
         project_id=project_id,
@@ -178,14 +204,8 @@ async def upload_project_media(
         ),
         video_files=saved_video_names,
         audio_file=audio_name,
-        logs=[
-            f"[UPLOAD] Projet #{project_id} créé avec {len(saved_video_names)} rush(s) vidéo.",
-            (
-                f"[UPLOAD] Piste audio chargée : {audio_name}"
-                if audio_name
-                else "[UPLOAD] Aucune musique sélectionnée → Montage sans musique (son vidéo forcé à 0)."
-            ),
-        ],
+        inspiration_file=inspiration_name,
+        logs=logs,
     )
 
     return UploadResponse(
@@ -193,6 +213,7 @@ async def upload_project_media(
         message="Fichiers uploadés avec succès. Prêt à lancer le traitement.",
         video_files=saved_video_names,
         audio_file=audio_name,
+        inspiration_file=inspiration_name,
     )
 
 
@@ -308,13 +329,15 @@ async def _run_full_editing_pipeline(
     project_upload_dir = settings.uploads_dir / project_id
     videos_dir = project_upload_dir / "videos"
     audio_dir = project_upload_dir / "audio"
+    inspiration_dir = project_upload_dir / "inspiration"
     temp_project_dir = settings.temp_dir / project_id
     export_project_dir = settings.exports_dir / project_id
     temp_project_dir.mkdir(parents=True, exist_ok=True)
     export_project_dir.mkdir(parents=True, exist_ok=True)
 
     video_paths = sorted(videos_dir.glob("*"))
-    audio_path = next(audio_dir.glob("*"), None)
+    audio_path = next(audio_dir.glob("*"), None) if audio_dir.exists() else None
+    inspiration_path = next(inspiration_dir.glob("*"), None) if inspiration_dir.exists() else None
 
     if not video_paths:
         _update_project(
@@ -328,36 +351,87 @@ async def _run_full_editing_pipeline(
         return
 
     try:
+        effective_aspect_ratio = options.aspect_ratio
+        effective_target_duration = options.target_duration
+        inspiration_cuts = None
+
         # ---------------------------------------------------------------------
-        # ÉTAPE 1 : ANALYSE AUDIO (LIBROSA) OU GRILLE MUETTE (SANS MUSIQUE)
+        # ÉTAPE 0 (OPTIONNELLE) : ANALYSE DE LA VIDÉO D'INSPIRATION
+        # ---------------------------------------------------------------------
+        if inspiration_path is not None and inspiration_path.exists():
+            _update_project(
+                project_id,
+                PipelineStage.ANALYZING_AUDIO,
+                11,
+                f"Analyse de la vidéo d'inspiration '{inspiration_path.name}' (format, cuts & musique)...",
+            )
+            insp_analyzer = InspirationVideoAnalyzer()
+            extracted_insp_audio = temp_project_dir / "inspiration_extracted.mp3"
+            should_extract_audio = (
+                audio_path is None and options.use_inspiration_audio and not options.mute_output
+            )
+            insp_result = await asyncio.to_thread(
+                insp_analyzer.analyze_inspiration_video,
+                inspiration_path,
+                extracted_insp_audio if should_extract_audio else None,
+            )
+            project.inspiration_analysis = insp_result
+            effective_aspect_ratio = insp_result.detected_aspect_ratio
+            effective_target_duration = insp_result.duration
+
+            if insp_result.scene_cuts:
+                inspiration_cuts = InspirationVideoAnalyzer.cuts_to_beat_drops(insp_result.scene_cuts)
+
+            if should_extract_audio and insp_result.audio_extracted and extracted_insp_audio.exists():
+                audio_path = extracted_insp_audio
+
+            cuts_str = ", ".join(f"{c:.2f}s" for c in insp_result.scene_cuts) or "aucune coupe détectée"
+            project.logs.append(
+                f"[INSPIRATION] Format={insp_result.detected_aspect_ratio} | "
+                f"Durée={insp_result.duration:.2f}s | Cuts détectés=[{cuts_str}]"
+            )
+
+        # Si l'utilisateur a explicitement demandé de monter sans musique (son vidéo à 0)
+        if options.mute_output:
+            audio_path = None
+
+        # ---------------------------------------------------------------------
+        # ÉTAPE 1 : ANALYSE AUDIO (LIBROSA) OU GRILLE MUETTE / INSPIRATION
         # ---------------------------------------------------------------------
         audio_analyzer = AudioBeatDropAnalyzer()
         if audio_path is not None and audio_path.exists():
             _update_project(
                 project_id,
                 PipelineStage.ANALYZING_AUDIO,
-                15,
-                f"Analyse musicale Librosa sur '{audio_path.name}' (durée cible: {options.target_duration:.1f}s)...",
+                18,
+                f"Analyse musicale Librosa sur '{audio_path.name}' (durée cible: {effective_target_duration:.1f}s)...",
             )
             audio_result = await asyncio.to_thread(
                 audio_analyzer.analyze_track,
                 audio_path,
                 options.drop_sensitivity,
-                options.target_duration,
+                effective_target_duration,
             )
             audio_log_prefix = f"[AUDIO] BPM={audio_result.bpm}"
         else:
             _update_project(
                 project_id,
                 PipelineStage.ANALYZING_AUDIO,
-                15,
-                f"Mode sans musique : génération de la grille de coupes ({options.target_duration:.1f}s, son vidéo à 0)...",
+                18,
+                f"Mode sans musique : génération de la grille de coupes ({effective_target_duration:.1f}s, son vidéo à 0)...",
             )
             audio_result = audio_analyzer.generate_silent_cut_grid(
                 sensitivity=options.drop_sensitivity,
-                target_duration=options.target_duration,
+                target_duration=effective_target_duration,
             )
             audio_log_prefix = "[SANS MUSIQUE] Son vidéo coupé à 0"
+
+        # Si la vidéo d'inspiration possède ses propres cuts détectés, ils prennent la priorité
+        # pour cloner exactement le rythme de montage de la vidéo d'inspiration !
+        if inspiration_cuts:
+            audio_result.beat_drops = inspiration_cuts
+            audio_result.effective_duration = round(effective_target_duration, 3)
+            audio_log_prefix += " (Cuts clonés sur la vidéo d'inspiration)"
 
         project.audio_analysis = audio_result
         drop_times_str = ", ".join(f"{d.timestamp:.2f}s" for d in audio_result.beat_drops) or "aucun"
@@ -421,7 +495,7 @@ async def _run_full_editing_pipeline(
             audio_path,
             raw_assembled_path,
             audio_result.effective_duration,
-            options.aspect_ratio,
+            effective_aspect_ratio,
             options.editing_mode,
             options.fast_speed_factor,
             options.slow_speed_factor,
@@ -432,7 +506,7 @@ async def _run_full_editing_pipeline(
             project_id,
             PipelineStage.COLOR_GRADING,
             84,
-            f"Application du profil colorimétrique '{options.lut_preset}' en {options.aspect_ratio}...",
+            f"Application du profil colorimétrique '{options.lut_preset}' en {effective_aspect_ratio}...",
             f"[MONTAGE] {len(synced_segments)} plans assemblés par coupes franches (sans transition, sans étirement).",
         )
 
@@ -468,7 +542,7 @@ async def _run_full_editing_pipeline(
             audio_result.beat_drops,
             audio_path,
             final_xml_path,
-            options.aspect_ratio,
+            effective_aspect_ratio,
         )
 
         project.output_video_url = f"/api/v1/projects/{project_id}/download/video"
@@ -477,7 +551,7 @@ async def _run_full_editing_pipeline(
             project_id,
             PipelineStage.COMPLETED,
             100,
-            f"Montage Posing ({options.aspect_ratio}, {audio_result.effective_duration:.1f}s) prêt !",
+            f"Montage Posing ({effective_aspect_ratio}, {audio_result.effective_duration:.1f}s) prêt !",
             "[EXPORT] Vidéo MP4 et fichier XML Premiere/Resolve générés avec succès.",
         )
 

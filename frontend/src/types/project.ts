@@ -53,11 +53,21 @@ export interface SelectedVideoSegment {
   speed_slow_factor: number
 }
 
+export interface InspirationAnalysisResult {
+  filename: string
+  duration: number
+  detected_aspect_ratio: AspectRatioOption
+  scene_cuts: number[]
+  audio_extracted: boolean
+}
+
 export interface ProcessProjectRequest {
   aspect_ratio: AspectRatioOption
   editing_mode: EditingModeOption
   target_duration: number
   include_intro_shot: boolean
+  use_inspiration_audio: boolean
+  mute_output: boolean
   min_effort_score: number
   ollama_model: string
   fast_speed_factor: number
@@ -71,6 +81,7 @@ export interface UploadResponse {
   message: string
   video_files: string[]
   audio_file: string | null
+  inspiration_file: string | null
 }
 
 export interface ProjectStatusResponse {
@@ -80,11 +91,15 @@ export interface ProjectStatusResponse {
   current_step_detail: string
   video_files: string[]
   audio_file: string | null
+  inspiration_file: string | null
+  inspiration_analysis: InspirationAnalysisResult | null
   audio_analysis: AudioAnalysisResult | null
   frame_scores: FrameEffortScore[]
   selected_segments: SelectedVideoSegment[]
   output_video_url: string | null
-  output_xml_url: string | null
+  output_xml_url: OptionalString
   error_message: string | null
   logs: string[]
 }
+
+type OptionalString = string | null

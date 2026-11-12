@@ -31,6 +31,8 @@ import {
   AlertTriangle,
   Maximize2,
   Scissors,
+  Eye,
+  VolumeX,
 } from 'lucide-vue-next'
 
 import Button from '@/components/ui/Button.vue'
@@ -55,12 +57,15 @@ import type {
 // ---------------------------------------------------------------------------
 const videoFiles = ref<File[]>([])
 const audioFile = ref<File | null>(null)
+const inspirationFile = ref<File | null>(null)
 
 const isDraggingVideos = ref(false)
 const isDraggingAudio = ref(false)
+const isDraggingInspiration = ref(false)
 
 const videoInputRef = ref<HTMLInputElement | null>(null)
 const audioInputRef = ref<HTMLInputElement | null>(null)
+const inspirationInputRef = ref<HTMLInputElement | null>(null)
 
 // ---------------------------------------------------------------------------
 // ÉTAT RÉACTIF : PARAMÈTRES DU MOTEUR POSING & BEAT-CUT
@@ -76,6 +81,8 @@ const options = reactive<ProcessProjectRequest>({
   slow_speed_factor: 0.75,
   lut_preset: 'natural_aesthetic',
   drop_sensitivity: 0.65,
+  use_inspiration_audio: true,
+  mute_output: false,
 })
 
 // ---------------------------------------------------------------------------
@@ -203,6 +210,33 @@ function setAudioTrack(file: File) {
     return
   }
   audioFile.value = file
+  options.mute_output = false
+}
+
+function handleInspirationDrop(event: DragEvent) {
+  isDraggingInspiration.value = false
+  const droppedFiles = event.dataTransfer?.files
+  if (!droppedFiles || droppedFiles.length === 0) return
+  setInspirationVideo(droppedFiles[0])
+}
+
+function handleInspirationSelect(event: Event) {
+  const target = event.target as HTMLInputElement
+  if (!target.files || target.files.length === 0) return
+  setInspirationVideo(target.files[0])
+  target.value = ''
+}
+
+function setInspirationVideo(file: File) {
+  uiError.value = null
+  if (
+    !file.type.startsWith('video/') &&
+    !/\.(mp4|mov|mkv|webm)$/i.test(file.name)
+  ) {
+    uiError.value = "Veuillez sélectionner une vidéo d'inspiration valide (.mp4, .mov)."
+    return
+  }
+  inspirationFile.value = file
 }
 
 function formatFileSize(bytes: number): string {
@@ -220,7 +254,11 @@ async function launchAutomatedEdit() {
   isUploading.value = true
 
   try {
-    const uploadRes = await uploadProjectMedia(videoFiles.value, audioFile.value)
+    const uploadRes = await uploadProjectMedia(
+      videoFiles.value,
+      audioFile.value,
+      inspirationFile.value
+    )
 
     isUploading.value = false
     isProcessing.value = true
@@ -530,6 +568,112 @@ onUnmounted(() => {
               </Button>
             </div>
           </div>
+
+          <!-- Option explicite pour forcer le son à 0 (même avec une vidéo d'inspiration) -->
+          <label
+            v-if="!audioFile"
+            class="mt-3 flex items-center justify-between rounded-xl border border-zinc-800/80 bg-zinc-950/60 px-3.5 py-2 cursor-pointer"
+          >
+            <div class="flex items-center gap-2">
+              <VolumeX class="h-4 w-4 text-zinc-400" />
+              <span class="text-xs text-zinc-300">
+                Forcer le montage sans musique (volume de la vidéo finale à 0)
+              </span>
+            </div>
+            <input
+              v-model="options.mute_output"
+              type="checkbox"
+              class="h-4 w-4 accent-red-600 rounded"
+            />
+          </label>
+        </Card>
+
+        <!-- 3. Zone de dépôt d'une Vidéo d'Inspiration / Référence (Optionnelle) -->
+        <Card class="p-6">
+          <div class="mb-4 flex items-center justify-between">
+            <div class="flex items-center gap-2.5">
+              <Eye class="h-5 w-5 text-red-500" />
+              <h2 class="text-lg font-bold text-white">
+                3. Vidéo d'Inspiration / Référence (.mp4) — Optionnel
+              </h2>
+            </div>
+            <Badge v-if="inspirationFile" variant="success">
+              Modèle d'inspiration actif
+            </Badge>
+            <Badge v-else variant="outline">
+              Facultatif
+            </Badge>
+          </div>
+
+          <div
+            class="group relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 text-center transition-all"
+            :class="
+              isDraggingInspiration
+                ? 'border-red-500 bg-red-950/20'
+                : 'border-zinc-800 bg-zinc-950/50 hover:border-zinc-700 hover:bg-zinc-900/50'
+            "
+            @dragover.prevent="isDraggingInspiration = true"
+            @dragleave.prevent="isDraggingInspiration = false"
+            @drop.prevent="handleInspirationDrop"
+            @click="inspirationInputRef?.click()"
+          >
+            <input
+              ref="inspirationInputRef"
+              type="file"
+              accept="video/mp4,video/quicktime,.mp4,.mov"
+              class="hidden"
+              @change="handleInspirationSelect"
+            />
+
+            <template v-if="!inspirationFile">
+              <Eye class="mb-2 h-6 w-6 text-red-500" />
+              <p class="text-sm font-medium text-zinc-200">
+                Glissez un TikTok de référence (ex: exemple.mp4) pour cloner son style
+              </p>
+              <p class="mt-1 text-xs text-zinc-500">
+                Clonage automatique : format (9:16 ou 16:9), durée exacte, rythme des cuts francs et bande-son
+              </p>
+            </template>
+
+            <div
+              v-else
+              class="flex w-full items-center justify-between rounded-lg bg-zinc-900/90 px-4 py-2.5"
+              @click.stop
+            >
+              <div class="flex items-center gap-3 truncate">
+                <Film class="h-5 w-5 shrink-0 text-red-400" />
+                <div class="text-left truncate">
+                  <p class="truncate text-sm font-semibold text-white">
+                    {{ inspirationFile.name }}
+                  </p>
+                  <p class="text-xs text-zinc-400">
+                    {{ formatFileSize(inspirationFile.size) }} • Format, Cuts & Audio clonés
+                  </p>
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                @click="inspirationFile = null"
+              >
+                Retirer
+              </Button>
+            </div>
+          </div>
+
+          <label
+            v-if="inspirationFile && !audioFile && !options.mute_output"
+            class="mt-3 flex items-center justify-between rounded-xl border border-zinc-800/80 bg-zinc-950/60 px-3.5 py-2 cursor-pointer"
+          >
+            <span class="text-xs text-zinc-300">
+              Extraire et utiliser automatiquement la musique de la vidéo d'inspiration
+            </span>
+            <input
+              v-model="options.use_inspiration_audio"
+              type="checkbox"
+              class="h-4 w-4 accent-red-600 rounded"
+            />
+          </label>
         </Card>
       </div>
 
@@ -783,18 +927,24 @@ onUnmounted(() => {
         v-if="projectStatus.selected_segments.length > 0"
         class="rounded-xl border border-zinc-800 bg-zinc-950/70 p-4"
       >
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
           <span class="text-xs font-bold uppercase tracking-wider text-zinc-400">
             Timeline des Poses & Coupes Franches (Sans Transition)
           </span>
-          <Badge v-if="projectStatus.audio_analysis" variant="default">
-            {{
-              projectStatus.audio_analysis.bpm > 0
-                ? `${projectStatus.audio_analysis.bpm} BPM`
-                : 'Sans Musique (Son à 0)'
-            }}
-            • {{ projectStatus.audio_analysis.effective_duration }}s
-          </Badge>
+          <div class="flex flex-wrap items-center gap-2">
+            <Badge v-if="projectStatus.inspiration_analysis" variant="secondary">
+              Inspiration : {{ projectStatus.inspiration_analysis.detected_aspect_ratio }} •
+              {{ projectStatus.inspiration_analysis.scene_cuts.length }} cuts clonés
+            </Badge>
+            <Badge v-if="projectStatus.audio_analysis" variant="default">
+              {{
+                projectStatus.audio_analysis.bpm > 0
+                  ? `${projectStatus.audio_analysis.bpm} BPM`
+                  : 'Sans Musique (Son à 0)'
+              }}
+              • {{ projectStatus.audio_analysis.effective_duration }}s
+            </Badge>
+          </div>
         </div>
 
         <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">

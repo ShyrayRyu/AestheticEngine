@@ -77,6 +77,25 @@ class SelectedVideoSegment(BaseModel):
     speed_slow_factor: float = Field(default=1.0, description="Facteur de vitesse de maintien")
 
 
+class InspirationAnalysisResult(BaseModel):
+    """Résultat de l'analyse d'une vidéo TikTok d'inspiration déposée en référence."""
+
+    filename: str = Field(..., description="Nom de la vidéo d'inspiration")
+    duration: float = Field(..., description="Durée exacte de la vidéo d'inspiration en secondes")
+    detected_aspect_ratio: Literal["9:16", "16:9"] = Field(
+        default="9:16",
+        description="Format réel détecté sur la vidéo d'inspiration (9:16 ou 16:9)",
+    )
+    scene_cuts: List[float] = Field(
+        default_factory=list,
+        description="Timestamps des changements de plans (Hard Cuts) détectés dans la vidéo d'inspiration",
+    )
+    audio_extracted: bool = Field(
+        default=False,
+        description="Indique si la musique de la vidéo d'inspiration a été extraite avec succès",
+    )
+
+
 class ProcessProjectRequest(BaseModel):
     """Paramètres configurables par l'utilisateur lors du lancement du rendu."""
 
@@ -97,6 +116,14 @@ class ProcessProjectRequest(BaseModel):
     include_intro_shot: bool = Field(
         default=True,
         description="Inclure le plan d'introduction (mise en place avant le 1er drop à ~1.9s).",
+    )
+    use_inspiration_audio: bool = Field(
+        default=True,
+        description="Si une vidéo d'inspiration est présente et qu'aucun fichier audio séparé n'est fourni, utiliser la musique de la vidéo d'inspiration.",
+    )
+    mute_output: bool = Field(
+        default=False,
+        description="Forcer le montage sans musique (son de la vidéo mis à 0) même si une vidéo d'inspiration est fournie.",
     )
     min_effort_score: float = Field(
         default=7.0,
@@ -133,12 +160,13 @@ class ProcessProjectRequest(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    """Réponse renvoyée après l'upload des rushs vidéo et de la piste audio (optionnelle)."""
+    """Réponse renvoyée après l'upload des rushs vidéo, de la piste audio et de l'inspiration."""
 
     project_id: str
     message: str
     video_files: List[str]
     audio_file: Optional[str] = None
+    inspiration_file: Optional[str] = None
 
 
 class ProjectStatusResponse(BaseModel):
@@ -150,6 +178,8 @@ class ProjectStatusResponse(BaseModel):
     current_step_detail: str
     video_files: List[str] = Field(default_factory=list)
     audio_file: Optional[str] = None
+    inspiration_file: Optional[str] = None
+    inspiration_analysis: Optional[InspirationAnalysisResult] = None
     audio_analysis: Optional[AudioAnalysisResult] = None
     frame_scores: List[FrameEffortScore] = Field(default_factory=list)
     selected_segments: List[SelectedVideoSegment] = Field(default_factory=list)
