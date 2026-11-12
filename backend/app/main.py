@@ -467,6 +467,17 @@ async def _run_full_editing_pipeline(
         project.frame_scores = frame_scores
         project.selected_segments = selected_segments
 
+        # Vérification IA du bon sens de la vidéo et interchange automatique 9:16 <-> 16:9
+        resolved_ratio, was_adjusted, orient_msg = OllamaVisionScorer.resolve_optimal_aspect_ratio(
+            segments=selected_segments,
+            requested_aspect_ratio=effective_aspect_ratio,
+            auto_orient_and_frame=options.auto_orient_and_frame,
+        )
+        effective_aspect_ratio = resolved_ratio
+        project.effective_aspect_ratio = effective_aspect_ratio
+        project.orientation_corrected = was_adjusted
+        project.logs.append(f"[ORIENTATION IA] {orient_msg}")
+
         pose_summary = ", ".join(
             f"{s.pose_label} (@{s.peak_time_in_source:.1f}s)" for s in selected_segments[:needed_shots]
         )
@@ -474,7 +485,7 @@ async def _run_full_editing_pipeline(
             project_id,
             PipelineStage.SPEED_RAMPING,
             60,
-            f"{len(selected_segments)} séquences de posing variées sélectionnées.",
+            f"{len(selected_segments)} poses sélectionnées • Format {effective_aspect_ratio} ({orient_msg})",
             f"[POSING IA] Plans retenus : {pose_summary}",
         )
 

@@ -60,13 +60,11 @@ class SpeedRampVideoEditor:
         if not segments:
             raise ValueError("Aucun segment vidéo disponible pour le montage.")
 
-        # Définition de la résolution cible et du ratio selon le choix 9:16 ou 16:9
+        # Définition de la résolution cible selon le format 9:16 ou 16:9
         if aspect_ratio == "16:9":
             target_w, target_h = 1920, 1080
-            crop_expr = "crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',scale=1920:1080:flags=lanczos,setsar=1"
         else:
             target_w, target_h = 1080, 1920
-            crop_expr = "crop='min(iw,ih*9/16)':'min(ih,iw*16/9)',scale=1080:1920:flags=lanczos,setsar=1"
 
         # Construction de la liste des intervalles temporels sur la timeline musicale
         cut_points: List[float] = [0.0]
@@ -97,12 +95,18 @@ class SpeedRampVideoEditor:
             seg = segments[idx % len(segments)]
             src_path = Path(seg.source_video)
             src_duration = self._get_video_duration(src_path)
+            crop_expr = self._build_segment_crop_filter(seg=seg, aspect_ratio=aspect_ratio)
 
             if progress_callback:
                 pct = int(((idx + 1) / len(intervals)) * 90)
+                rot_info = (
+                    f", redressé {seg.rotation_correction}°"
+                    if seg.rotation_correction != 0
+                    else ""
+                )
                 progress_callback(
                     f"Découpe plan #{idx + 1}/{len(intervals)} ({seg.pose_label}) "
-                    f"→ [{t_start_tl:.2f}s - {t_end_tl:.2f}s] ({aspect_ratio} sans étirement)",
+                    f"→ [{t_start_tl:.2f}s - {t_end_tl:.2f}s] ({aspect_ratio} bien cadré{rot_info})",
                     pct,
                 )
 
@@ -423,6 +427,45 @@ class SpeedRampVideoEditor:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode != 0:
             raise RuntimeError(f"Erreur FFmpeg concaténation finale : {res.stderr[-300:]}")
+
+    @staticmethod
+    def _build_segment_crop_filter(
+        seg: SelectedVideoSegment,
+        aspect_ratio: Literal["9:16", "16:9"],
+    ) -> str:
+        """
+        Construit la chaîne de filtres vidéo FFmpeg pour un segment donné :
+          1. Redressement automatique dans le bon sens si l'IA a détecté une rotation
+             (`90°` -> `transpose=1`, `270°` -> `transpose=2`, `180°` -> `hflip,vflip`).
+          2. Rognage intelligent centré sur le buste/visage de l'athlète `(focus_x, focus_y)`
+             sans aucun étirement (`setsar=1`) au format `9:16` (1080x1920) ou `16:9` (1920x1080).
+        """
+        rot = seg.rotation_correction % 360
+        rot_prefix = ""
+        if rot == 90:
+            rot_prefix = "transpose=1,"
+        elif rot == 270:
+            rot_prefix = "transpose=2,"
+        elif rot == 180:
+            rot_prefix = "hflip,vflip,"
+
+        fx = max(0.15, min(0.85, float(seg.focus_x)))
+        fy = max(0.20, min(0.80, float(seg.focus_y)))
+
+        if aspect_ratio == "16:9":
+            crop_scale = (
+                f"crop=w='min(iw,ih*16/9)':h='min(ih,iw*9/16)':"
+                f"x='clip(iw*{fx:.3f}-ow/2,0,iw-ow)':y='clip(ih*{fy:.3f}-oh/2,0,ih-oh)',"
+                f"scale=1920:1080:flags=lanczos,setsar=1"
+            )
+        else:
+            crop_scale = (
+                f"crop=w='min(iw,ih*9/16)':h='min(ih,iw*16/9)':"
+                f"x='clip(iw*{fx:.3f}-ow/2,0,iw-ow)':y='clip(ih*{fy:.3f}-oh/2,0,ih-oh)',"
+                f"scale=1080:1920:flags=lanczos,setsar=1"
+            )
+
+        return f"{rot_prefix}{crop_scale}"
 
     @staticmethod
     def _get_video_duration(video_path: Path) -> float:

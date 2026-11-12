@@ -51,6 +51,10 @@ export interface SelectedVideoSegment {
   target_beat_drop: number | null
   speed_fast_factor: number
   speed_slow_factor: number
+  rotation_correction?: number
+  upright_aspect_ratio?: AspectRatioOption
+  focus_x?: number
+  focus_y?: number
 }
 
 export interface InspirationAnalysisResult {
@@ -63,6 +67,7 @@ export interface InspirationAnalysisResult {
 
 export interface ProcessProjectRequest {
   aspect_ratio: AspectRatioOption
+  auto_orient_and_frame: boolean
   editing_mode: EditingModeOption
   target_duration: number
   include_intro_shot: boolean
@@ -93,6 +98,8 @@ export interface ProjectStatusResponse {
   audio_file: string | null
   inspiration_file: string | null
   inspiration_analysis: InspirationAnalysisResult | null
+  effective_aspect_ratio?: AspectRatioOption
+  orientation_corrected?: boolean
   audio_analysis: AudioAnalysisResult | null
   frame_scores: FrameEffortScore[]
   selected_segments: SelectedVideoSegment[]

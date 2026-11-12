@@ -75,6 +75,26 @@ class SelectedVideoSegment(BaseModel):
     )
     speed_fast_factor: float = Field(default=1.0, description="Facteur de vitesse d'entrée")
     speed_slow_factor: float = Field(default=1.0, description="Facteur de vitesse de maintien")
+    rotation_correction: int = Field(
+        default=0,
+        description="Rotation horaire corrective en degrés (0, 90, 180, 270) appliquée par l'IA pour remettre la vidéo dans le bon sens",
+    )
+    upright_aspect_ratio: Literal["9:16", "16:9"] = Field(
+        default="9:16",
+        description="Format natif détecté une fois la vidéo remise dans le bon sens (9:16 ou 16:9)",
+    )
+    focus_x: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Centre horizontal normalisé (0..1) de l'athlète pour un cadrage intelligent",
+    )
+    focus_y: float = Field(
+        default=0.45,
+        ge=0.0,
+        le=1.0,
+        description="Centre vertical normalisé (0..1) de l'athlète pour un cadrage intelligent",
+    )
 
 
 class InspirationAnalysisResult(BaseModel):
@@ -102,6 +122,10 @@ class ProcessProjectRequest(BaseModel):
     aspect_ratio: Literal["9:16", "16:9"] = Field(
         default="9:16",
         description="Format de sortie : 9:16 (Vertical TikTok 1080x1920) ou 16:9 (Paysage 1920x1080), par rognage centré sans étirement.",
+    )
+    auto_orient_and_frame: bool = Field(
+        default=True,
+        description="Reconnaissance IA du bon sens de la vidéo (0°/90°/180°/270°), interchange automatique entre 9:16 et 16:9 si nécessaire, et cadrage centré sur l'athlète.",
     )
     editing_mode: Literal["pose_cut", "speed_ramp"] = Field(
         default="pose_cut",
@@ -180,6 +204,14 @@ class ProjectStatusResponse(BaseModel):
     audio_file: Optional[str] = None
     inspiration_file: Optional[str] = None
     inspiration_analysis: Optional[InspirationAnalysisResult] = None
+    effective_aspect_ratio: Literal["9:16", "16:9"] = Field(
+        default="9:16",
+        description="Format final effectivement appliqué (9:16 ou 16:9) après détection IA du bon sens",
+    )
+    orientation_corrected: bool = Field(
+        default=False,
+        description="Indique si l'IA a redressé une vidéo ou interchangé automatiquement entre 9:16 et 16:9",
+    )
     audio_analysis: Optional[AudioAnalysisResult] = None
     frame_scores: List[FrameEffortScore] = Field(default_factory=list)
     selected_segments: List[SelectedVideoSegment] = Field(default_factory=list)

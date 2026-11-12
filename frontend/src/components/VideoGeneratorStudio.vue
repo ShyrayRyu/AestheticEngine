@@ -72,6 +72,7 @@ const inspirationInputRef = ref<HTMLInputElement | null>(null)
 // ---------------------------------------------------------------------------
 const options = reactive<ProcessProjectRequest>({
   aspect_ratio: '9:16',
+  auto_orient_and_frame: true,
   editing_mode: 'pose_cut',
   target_duration: 21.5,
   include_intro_shot: true,
@@ -721,6 +722,25 @@ onUnmounted(() => {
                 <span class="mt-0.5 text-[11px] opacity-75">Cinéma / YouTube (1920×1080)</span>
               </button>
             </div>
+
+            <!-- Détection IA du bon sens & Interchange auto 9:16 <-> 16:9 -->
+            <label
+              class="mt-2.5 flex items-center justify-between rounded-xl border border-zinc-800/90 bg-zinc-950/60 px-3.5 py-2.5 cursor-pointer"
+            >
+              <div>
+                <span class="text-xs font-bold text-zinc-200 block">
+                  IA Sens & Cadrage Auto (Interchange 9:16 ↔ 16:9)
+                </span>
+                <span class="text-[11px] text-zinc-500">
+                  Détecte si la vidéo est tournée, la remet à l'endroit et bascule entre 9:16 et 16:9 pour bien cadrer l'athlète
+                </span>
+              </div>
+              <input
+                v-model="options.auto_orient_and_frame"
+                type="checkbox"
+                class="h-4 w-4 accent-red-600 rounded"
+              />
+            </label>
           </div>
 
           <!-- Style de Montage : Pose Cut 1.0x (Style exemple.mp4) vs Speed Ramp -->
@@ -932,6 +952,16 @@ onUnmounted(() => {
             Timeline des Poses & Coupes Franches (Sans Transition)
           </span>
           <div class="flex flex-wrap items-center gap-2">
+            <Badge
+              v-if="projectStatus.effective_aspect_ratio"
+              :variant="projectStatus.orientation_corrected ? 'success' : 'secondary'"
+            >
+              {{
+                projectStatus.orientation_corrected
+                  ? `IA Cadrage Auto : ${projectStatus.effective_aspect_ratio} (Redressé / Interchangé)`
+                  : `Format : ${projectStatus.effective_aspect_ratio}`
+              }}
+            </Badge>
             <Badge v-if="projectStatus.inspiration_analysis" variant="secondary">
               Inspiration : {{ projectStatus.inspiration_analysis.detected_aspect_ratio }} •
               {{ projectStatus.inspiration_analysis.scene_cuts.length }} cuts clonés
@@ -961,6 +991,9 @@ onUnmounted(() => {
             </div>
             <p class="mt-1 font-mono text-[11px] text-zinc-400">
               Rush source : {{ seg.start_time.toFixed(1) }}s – {{ seg.end_time.toFixed(1) }}s
+              <span v-if="seg.rotation_correction" class="text-emerald-400">
+                (Redressé {{ seg.rotation_correction }}°)
+              </span>
             </p>
           </div>
         </div>
@@ -984,7 +1017,7 @@ onUnmounted(() => {
           <div>
             <Badge variant="success" class="mb-2">RENDU TERMINÉ</Badge>
             <h4 class="text-xl font-bold text-white">
-              Votre TikTok Posing ({{ options.aspect_ratio }}) est prêt !
+              Votre TikTok Posing ({{ projectStatus.effective_aspect_ratio || options.aspect_ratio }}) est prêt !
             </h4>
             <p class="mt-1 text-sm text-zinc-300">
               Image non étirée (SAR 1:1), coupes franches synchronisées sur les
