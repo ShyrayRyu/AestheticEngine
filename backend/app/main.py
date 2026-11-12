@@ -18,7 +18,7 @@ import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import httpx
 from fastapi import (
@@ -123,8 +123,9 @@ async def upload_project_media(
     videos: List[UploadFile] = File(
         ..., description="Un ou plusieurs rushs vidéo de posing/musculation (.mp4, .mov)"
     ),
-    audio: UploadFile = File(
-        ..., description="Piste musicale contenant les beat drops (.mp3, .wav, .m4a)"
+    audio: Optional[UploadFile] = File(
+        default=None,
+        description="Piste musicale optionnelle (.mp3, .wav, .m4a). Si omise, montage muet (son vidéo à 0).",
     ),
 ) -> UploadResponse:
     if not videos:
@@ -155,23 +156,35 @@ async def upload_project_media(
             shutil.copyfileobj(video_file.file, buffer)
         saved_video_names.append(safe_video_name)
 
-    audio_name = Path(audio.filename or "soundtrack.mp3").name
-    dest_audio_path = audio_dir / audio_name
-    with dest_audio_path.open("wb") as buffer:
-        shutil.copyfileobj(audio.file, buffer)
+    audio_name: Optional[str] = None
+    if audio is not None and audio.filename:
+        audio_name = Path(audio.filename).name
+        dest_audio_path = audio_dir / audio_name
+        with dest_audio_path.open("wb") as buffer:
+            shutil.copyfileobj(audio.file, buffer)
+
+    audio_status_msg = (
+        f"piste '{audio_name}'"
+        if audio_name
+        else "mode sans musique (son vidéo coupé à 0)"
+    )
 
     PROJECTS_STATE[project_id] = ProjectStatusResponse(
         project_id=project_id,
         stage=PipelineStage.UPLOADED,
         progress_percent=5,
         current_step_detail=(
-            f"{len(saved_video_names)} rush(s) vidéo et piste '{audio_name}' prêts pour l'analyse."
+            f"{len(saved_video_names)} rush(s) vidéo et {audio_status_msg} prêts pour l'analyse."
         ),
         video_files=saved_video_names,
         audio_file=audio_name,
         logs=[
             f"[UPLOAD] Projet #{project_id} créé avec {len(saved_video_names)} rush(s) vidéo.",
-            f"[UPLOAD] Piste audio chargée : {audio_name}",
+            (
+                f"[UPLOAD] Piste audio chargée : {audio_name}"
+                if audio_name
+                else "[UPLOAD] Aucune musique sélectionnée → Montage sans musique (son vidéo forcé à 0)."
+            ),
         ],
     )
 
@@ -303,34 +316,49 @@ async def _run_full_editing_pipeline(
     video_paths = sorted(videos_dir.glob("*"))
     audio_path = next(audio_dir.glob("*"), None)
 
-    if not video_paths or audio_path is None:
+    if not video_paths:
         _update_project(
             project_id,
             PipelineStage.FAILED,
             0,
-            "Fichiers médias manquants dans le dossier projet.",
-            "[ERREUR] Fichiers médias introuvables.",
+            "Aucun rush vidéo trouvé dans le dossier projet.",
+            "[ERREUR] Rushs vidéo introuvables.",
         )
-        project.error_message = "Fichiers médias introuvables."
+        project.error_message = "Rushs vidéo introuvables."
         return
 
     try:
         # ---------------------------------------------------------------------
-        # ÉTAPE 1 : ANALYSE AUDIO & DÉTECTION DES POINTS DE COUPE (LIBROSA)
+        # ÉTAPE 1 : ANALYSE AUDIO (LIBROSA) OU GRILLE MUETTE (SANS MUSIQUE)
         # ---------------------------------------------------------------------
-        _update_project(
-            project_id,
-            PipelineStage.ANALYZING_AUDIO,
-            15,
-            f"Analyse musicale Librosa sur '{audio_path.name}' (durée cible: {options.target_duration:.1f}s)...",
-        )
         audio_analyzer = AudioBeatDropAnalyzer()
-        audio_result = await asyncio.to_thread(
-            audio_analyzer.analyze_track,
-            audio_path,
-            options.drop_sensitivity,
-            options.target_duration,
-        )
+        if audio_path is not None and audio_path.exists():
+            _update_project(
+                project_id,
+                PipelineStage.ANALYZING_AUDIO,
+                15,
+                f"Analyse musicale Librosa sur '{audio_path.name}' (durée cible: {options.target_duration:.1f}s)...",
+            )
+            audio_result = await asyncio.to_thread(
+                audio_analyzer.analyze_track,
+                audio_path,
+                options.drop_sensitivity,
+                options.target_duration,
+            )
+            audio_log_prefix = f"[AUDIO] BPM={audio_result.bpm}"
+        else:
+            _update_project(
+                project_id,
+                PipelineStage.ANALYZING_AUDIO,
+                15,
+                f"Mode sans musique : génération de la grille de coupes ({options.target_duration:.1f}s, son vidéo à 0)...",
+            )
+            audio_result = audio_analyzer.generate_silent_cut_grid(
+                sensitivity=options.drop_sensitivity,
+                target_duration=options.target_duration,
+            )
+            audio_log_prefix = "[SANS MUSIQUE] Son vidéo coupé à 0"
+
         project.audio_analysis = audio_result
         drop_times_str = ", ".join(f"{d.timestamp:.2f}s" for d in audio_result.beat_drops) or "aucun"
         needed_shots = len(audio_result.beat_drops) + 1
@@ -339,8 +367,8 @@ async def _run_full_editing_pipeline(
             project_id,
             PipelineStage.ANALYZING_VISION,
             28,
-            f"BPM: {audio_result.bpm} | {len(audio_result.beat_drops)} coupes détectées ({needed_shots} plans à extraire).",
-            f"[AUDIO] BPM={audio_result.bpm} | Durée={audio_result.effective_duration}s | Coupes à : [{drop_times_str}]",
+            f"{len(audio_result.beat_drops)} coupes programmées ({needed_shots} plans de posing à extraire).",
+            f"{audio_log_prefix} | Durée={audio_result.effective_duration}s | Coupes à : [{drop_times_str}]",
         )
 
         # ---------------------------------------------------------------------

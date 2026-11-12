@@ -8,7 +8,7 @@ marqueurs de Beat Drops et piste audio) dans Premiere Pro ou DaVinci Resolve.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Literal
+from typing import List, Literal, Optional
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
@@ -26,7 +26,7 @@ class PremiereResolveXMLExporter:
         project_id: str,
         segments: List[SelectedVideoSegment],
         beat_drops: List[BeatDropEvent],
-        audio_path: Path,
+        audio_path: Optional[Path],
         output_xml_path: Path,
         aspect_ratio: Literal["9:16", "16:9"] = "9:16",
     ) -> Path:
@@ -70,19 +70,20 @@ class PremiereResolveXMLExporter:
 
         ET.SubElement(sequence, "duration").text = str(max(1, timeline_frame_cursor))
 
-        audio = ET.SubElement(media, "audio")
-        a_track = ET.SubElement(audio, "track")
-        abs_audio = audio_path.resolve()
-        self._append_clipitem(
-            track=a_track,
-            clip_id="audio-master-1",
-            clip_name=abs_audio.name,
-            file_path=abs_audio,
-            start_frame=0,
-            end_frame=timeline_frame_cursor,
-            in_frame=0,
-            out_frame=timeline_frame_cursor,
-        )
+        if audio_path is not None and audio_path.exists():
+            audio = ET.SubElement(media, "audio")
+            a_track = ET.SubElement(audio, "track")
+            abs_audio = audio_path.resolve()
+            self._append_clipitem(
+                track=a_track,
+                clip_id="audio-master-1",
+                clip_name=abs_audio.name,
+                file_path=abs_audio,
+                start_frame=0,
+                end_frame=timeline_frame_cursor,
+                in_frame=0,
+                out_frame=timeline_frame_cursor,
+            )
 
         for d_idx, drop in enumerate(beat_drops):
             marker = ET.SubElement(sequence, "marker")

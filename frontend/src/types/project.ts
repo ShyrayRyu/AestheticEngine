@@ -70,7 +70,7 @@ export interface UploadResponse {
   project_id: string
   message: string
   video_files: string[]
-  audio_file: string
+  audio_file: string | null
 }
 
 export interface ProjectStatusResponse {

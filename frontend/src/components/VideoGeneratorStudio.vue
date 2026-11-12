@@ -127,7 +127,6 @@ const PIPELINE_STEPS: Array<{
 const canLaunchPipeline = computed(() => {
   return (
     videoFiles.value.length > 0 &&
-    audioFile.value !== null &&
     !isUploading.value &&
     !isProcessing.value
   )
@@ -215,7 +214,7 @@ function formatFileSize(bytes: number): string {
 // LANCEMENT DE L'UPLOAD ET DU PIPELINE DE MONTAGE
 // ---------------------------------------------------------------------------
 async function launchAutomatedEdit() {
-  if (!canLaunchPipeline.value || !audioFile.value) return
+  if (!canLaunchPipeline.value) return
 
   uiError.value = null
   isUploading.value = true
@@ -461,16 +460,19 @@ onUnmounted(() => {
           </ul>
         </Card>
 
-        <!-- 2. Zone de dépôt de la Piste Audio -->
+        <!-- 2. Zone de dépôt de la Piste Audio (Optionnelle) -->
         <Card class="p-6">
           <div class="mb-4 flex items-center justify-between">
             <div class="flex items-center gap-2.5">
               <Music class="h-5 w-5 text-red-500" />
               <h2 class="text-lg font-bold text-white">
-                2. Bande-Son TikTok (.mp3, .wav)
+                2. Bande-Son TikTok (.mp3, .wav) — Optionnel
               </h2>
             </div>
             <Badge v-if="audioFile" variant="success">Piste prête</Badge>
+            <Badge v-else variant="secondary">
+              Sans Musique (Son vidéo à 0)
+            </Badge>
           </div>
 
           <div
@@ -496,10 +498,10 @@ onUnmounted(() => {
             <template v-if="!audioFile">
               <Music class="mb-2 h-6 w-6 text-red-500" />
               <p class="text-sm font-medium text-zinc-200">
-                Déposez votre son TikTok (Gym Edit, Phonk, Aesthetic Audio)
+                Déposez un son TikTok (.mp3, .wav) ou laissez vide pour monter sans musique
               </p>
               <p class="mt-1 text-xs text-zinc-500">
-                Chaque changement de pose sera calé pile sur les temps forts / drops du son
+                Sans musique : les poses s'enchaînent automatiquement et le son de la vidéo est forcé à 0 (muet)
               </p>
             </template>
 
@@ -524,7 +526,7 @@ onUnmounted(() => {
                 size="sm"
                 @click="audioFile = null"
               >
-                Changer
+                Retirer (Monter sans musique)
               </Button>
             </div>
           </div>
@@ -786,8 +788,12 @@ onUnmounted(() => {
             Timeline des Poses & Coupes Franches (Sans Transition)
           </span>
           <Badge v-if="projectStatus.audio_analysis" variant="default">
-            {{ projectStatus.audio_analysis.bpm }} BPM •
-            {{ projectStatus.audio_analysis.effective_duration }}s
+            {{
+              projectStatus.audio_analysis.bpm > 0
+                ? `${projectStatus.audio_analysis.bpm} BPM`
+                : 'Sans Musique (Son à 0)'
+            }}
+            • {{ projectStatus.audio_analysis.effective_duration }}s
           </Badge>
         </div>
 

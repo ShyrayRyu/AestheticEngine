@@ -43,7 +43,7 @@ class SpeedRampVideoEditor:
         self,
         segments: List[SelectedVideoSegment],
         beat_drops: List[BeatDropEvent],
-        audio_path: Path,
+        audio_path: Optional[Path],
         output_raw_video_path: Path,
         effective_duration: float = 21.13,
         aspect_ratio: Literal["9:16", "16:9"] = "9:16",
@@ -343,46 +343,83 @@ class SpeedRampVideoEditor:
     def _concat_parts_with_audio(
         self,
         part_files: List[Path],
-        audio_path: Path,
+        audio_path: Optional[Path],
         output_path: Path,
         total_duration: float,
     ) -> None:
         """
-        Concatène tous les sous-plans en coupes franches (sans transition) et ajoute
-        la bande-son sur la durée exacte `total_duration`.
+        Concatène tous les sous-plans en coupes franches (sans transition).
+        - Si une piste audio est fournie, elle est multiplexée sur `total_duration`.
+        - Si aucune piste audio n'est fournie (mode sans musique), le son d'origine des
+          rushs est supprimé et remplacé par une piste audio muette (volume strictement à 0).
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         concat_file = output_path.parent / "concat_parts.txt"
         lines = [f"file '{p.resolve()}'" for p in part_files]
         concat_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_file),
-            "-i",
-            str(audio_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-t",
-            f"{total_duration:.3f}",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            str(output_path),
-        ]
+        if audio_path is not None and audio_path.exists():
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-t",
+                f"{total_duration:.3f}",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+        else:
+            # Mode sans musique : piste audio stéréo muette (son à 0) pour une compatibilité maximale
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-t",
+                f"{total_duration:.3f}",
+                "-c:v",
+                "copy",
+                "-af",
+                "volume=0.0",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode != 0:
             raise RuntimeError(f"Erreur FFmpeg concaténation finale : {res.stderr[-300:]}")

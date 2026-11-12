@@ -132,6 +132,48 @@ class AudioBeatDropAnalyzer:
             beat_drops=beat_drops,
         )
 
+    def generate_silent_cut_grid(
+        self,
+        sensitivity: float = 0.65,
+        target_duration: float = 21.5,
+    ) -> AudioAnalysisResult:
+        """
+        Génère une grille rythmique de points de coupe lorsque l'utilisateur choisit
+        de monter SANS musique (son vidéo coupé à 0).
+        Reproduit la cadence naturelle d'un TikTok de posing (~2.0s d'intro puis
+        changements de pose toutes les 2.3s à 3.6s selon la sensibilité choisie).
+        """
+        effective_duration = max(6.0, float(target_duration))
+        clamped_sens = float(np.clip(sensitivity, 0.1, 0.95))
+
+        # Cadence entre deux coupes : de ~3.8s (sens=0.1) à ~2.2s (sens=0.95), ~2.75s par défaut
+        step_sec = round(4.0 - clamped_sens * 1.9, 2)
+        first_cut = min(2.0, effective_duration * 0.25)
+
+        beat_drops: List[BeatDropEvent] = []
+        cursor = first_cut
+        prev_time = 0.0
+
+        while cursor < effective_duration - 1.4:
+            beat_drops.append(
+                BeatDropEvent(
+                    timestamp=round(cursor, 3),
+                    intensity=0.85,
+                    buildup_start=round(prev_time, 3),
+                    sub_bass_energy=0.0,
+                )
+            )
+            prev_time = cursor
+            cursor = round(cursor + step_sec, 3)
+
+        return AudioAnalysisResult(
+            bpm=0.0,
+            duration=round(effective_duration, 2),
+            effective_duration=round(effective_duration, 3),
+            beat_timestamps=[d.timestamp for d in beat_drops],
+            beat_drops=beat_drops,
+        )
+
     def _select_posing_cut_points(
         self,
         composite_score: np.ndarray,

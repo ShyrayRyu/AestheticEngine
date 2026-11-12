@@ -133,12 +133,12 @@ class ProcessProjectRequest(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    """Réponse renvoyée après l'upload des rushs vidéo et de la piste audio."""
+    """Réponse renvoyée après l'upload des rushs vidéo et de la piste audio (optionnelle)."""
 
     project_id: str
     message: str
     video_files: List[str]
-    audio_file: str
+    audio_file: Optional[str] = None
 
 
 class ProjectStatusResponse(BaseModel):
