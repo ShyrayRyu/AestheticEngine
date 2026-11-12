@@ -64,8 +64,6 @@ class PoseCandidateWindow:
     pose_label: str = "Pose Aesthetic"
     rotation_correction: int = 0
     upright_aspect_ratio: Literal["9:16", "16:9"] = "9:16"
-    focus_x: float = 0.50
-    focus_y: float = 0.45
 
 
 class OllamaVisionScorer:
@@ -182,8 +180,6 @@ class OllamaVisionScorer:
                     max_effort_score=8.5,
                     rotation_correction=intro_candidate.rotation_correction,
                     upright_aspect_ratio=intro_candidate.upright_aspect_ratio,
-                    focus_x=round(intro_candidate.focus_x, 3),
-                    focus_y=round(intro_candidate.focus_y, 3),
                 )
             )
 
@@ -199,8 +195,6 @@ class OllamaVisionScorer:
                         max_effort_score=round(pose_win.score, 1),
                         rotation_correction=pose_win.rotation_correction,
                         upright_aspect_ratio=pose_win.upright_aspect_ratio,
-                        focus_x=round(pose_win.focus_x, 3),
-                        focus_y=round(pose_win.focus_y, 3),
                     )
                 )
 
@@ -218,7 +212,7 @@ class OllamaVisionScorer:
         Si `auto_orient_and_frame=True` et que le sens réel des rushs est inversé par rapport
         au format choisi (ex: rush filmé en 16:9 alors que 9:16 est coché, ou inversement,
         ou rush tourné à 90°/270° qui change de ratio une fois redressé), l'IA interchange
-        automatiquement entre `9:16` et `16:9` pour que la vidéo soit dans le bon sens et bien cadrée.
+        automatiquement entre `9:16` et `16:9` sans jamais rogner ni recadrer la vidéo.
         """
         if not segments:
             return requested_aspect_ratio, False, "Format conservé par défaut."
@@ -234,28 +228,28 @@ class OllamaVisionScorer:
         if not auto_orient_and_frame:
             msg = (
                 f"Format {requested_aspect_ratio} forcé manuellement "
-                f"(rotation IA appliquée sur {rotated_count} plan(s))."
+                f"(rotation IA appliquée sur {rotated_count} plan(s), sans rognage)."
             )
             return requested_aspect_ratio, rotated_count > 0, msg
 
         if dominant_ratio != requested_aspect_ratio:
             msg = (
-                f"IA Orientation & Cadrage : vidéo détectée en {dominant_ratio} une fois dans le bon sens "
+                f"IA Sens & Format : vidéo détectée en {dominant_ratio} une fois dans le bon sens "
                 f"→ interchange automatique {requested_aspect_ratio} ↔ {dominant_ratio} "
-                f"(redressement {rotated_count} plan(s))."
+                f"(sans rognage, redressement {rotated_count} plan(s))."
             )
             logger.info(msg)
             return dominant_ratio, True, msg
 
         if rotated_count > 0:
             msg = (
-                f"IA Orientation & Cadrage : vidéo remise dans le bon sens "
-                f"({rotated_count} plan(s) redressé(s)) en {dominant_ratio}."
+                f"IA Sens & Format : vidéo remise dans le bon sens "
+                f"({rotated_count} plan(s) redressé(s)) en {dominant_ratio} sans rognage."
             )
             logger.info(msg)
             return dominant_ratio, True, msg
 
-        msg = f"IA Orientation & Cadrage : vidéo bien orientée dans le bon sens ({dominant_ratio})."
+        msg = f"IA Sens & Format : vidéo bien orientée dans le bon sens ({dominant_ratio}, sans rognage)."
         return dominant_ratio, False, msg
 
     @staticmethod
@@ -273,17 +267,16 @@ class OllamaVisionScorer:
     def _detect_video_orientation_and_framing(
         self,
         video_path: Path,
-    ) -> Tuple[int, Literal["9:16", "16:9"], float, float]:
+    ) -> Tuple[int, Literal["9:16", "16:9"]]:
         """
         Reconnaît automatiquement si un rush vidéo est dans le bon sens (athlète debout tête en haut)
         ou s'il est tourné sur le côté (90° / 270°) ou à l'envers (180°), et détermine :
           1. `rotation_correction` : 0, 90, 180 ou 270 degrés horaires pour remettre l'athlète debout.
           2. `upright_aspect_ratio` : '9:16' ou '16:9' une fois le rush remis dans le bon sens.
-          3. `(focus_x, focus_y)` : centre de gravité de l'athlète pour un cadrage optimal.
         """
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
-            return 0, "9:16", 0.50, 0.45
+            return 0, "9:16"
 
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -305,7 +298,7 @@ class OllamaVisionScorer:
             cap.release()
 
         if not sampled_frames:
-            return 0, "9:16", 0.50, 0.45
+            return 0, "9:16"
 
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -317,12 +310,6 @@ class OllamaVisionScorer:
         hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
         scores: Dict[int, float] = {0: 0.25, 90: 0.0, 180: 0.0, 270: 0.0}
-        focus_points: Dict[int, List[Tuple[float, float]]] = {
-            0: [],
-            90: [],
-            180: [],
-            270: [],
-        }
 
         for cand_angle in (0, 90, 180, 270):
             grays: List[np.ndarray] = []
@@ -346,7 +333,6 @@ class OllamaVisionScorer:
                         cx = (fx + fw * 0.5) / float(sw)
                         if 0.04 <= cy <= 0.52 and 0.15 <= cx <= 0.85:
                             scores[cand_angle] += 3.5
-                            focus_points[cand_angle].append((cx, min(0.52, cy + 0.14)))
 
                 # 2. Détection du haut du corps (épaules / buste)
                 if not upper_cascade.empty():
@@ -356,17 +342,13 @@ class OllamaVisionScorer:
                         cx = (ux + uw * 0.5) / float(sw)
                         if 0.08 <= cy <= 0.68 and 0.15 <= cx <= 0.85:
                             scores[cand_angle] += 2.0
-                            focus_points[cand_angle].append((cx, cy))
 
                 # 3. Détecteur de silhouette humaine debout (HOG)
-                rects, weights = hog.detectMultiScale(
+                _, weights = hog.detectMultiScale(
                     gray, winStride=(8, 8), padding=(8, 8), scale=1.05
                 )
-                for (hx, hy, hw, hh), w_val in zip(rects, weights):
+                for w_val in weights:
                     scores[cand_angle] += float(w_val) * 1.5
-                    focus_points[cand_angle].append(
-                        ((hx + hw * 0.5) / float(sw), (hy + hh * 0.45) / float(sh))
-                    )
 
             # 4. Analyse de la colonne vertébrale de mouvement & éclairage zénithal
             if len(grays) >= 2:
@@ -386,16 +368,7 @@ class OllamaVisionScorer:
                 if top_mot > bot_mot * 1.05:
                     scores[cand_angle] += 1.2
 
-                # Centre de masse du mouvement si aucun visage/buste n'a été isolé
-                total_m = float(np.sum(mean_mot))
-                if total_m > 1e-3:
-                    ys, xs = np.indices((sh, sw))
-                    mx = float(np.sum(xs * mean_mot) / (total_m * sw))
-                    my = float(np.sum(ys * mean_mot) / (total_m * sh))
-                    focus_points[cand_angle].append((mx, my))
-
         best_angle = max(scores, key=lambda k: scores[k])
-        # Si le score de rotation non nulle ne dépasse pas nettement 0°, on privilégie 0°
         if best_angle != 0 and scores[best_angle] < scores[0] + 1.2:
             best_angle = 0
 
@@ -403,23 +376,14 @@ class OllamaVisionScorer:
         uh, uw = upright_sample.shape[:2]
         upright_aspect: Literal["9:16", "16:9"] = "9:16" if uh >= uw else "16:9"
 
-        pts = focus_points[best_angle]
-        if pts:
-            fx = float(np.clip(np.median([p[0] for p in pts]), 0.22, 0.78))
-            fy = float(np.clip(np.median([p[1] for p in pts]), 0.35, 0.56))
-        else:
-            fx, fy = 0.50, 0.45
-
         logger.info(
-            "Orientation IA '%s' : rotation_correction=%d° | format_redressé=%s | focus=(%.2f, %.2f) | scores=%s",
+            "Orientation IA '%s' : rotation_correction=%d° | format_redressé=%s | scores=%s",
             video_path.name,
             best_angle,
             upright_aspect,
-            fx,
-            fy,
             {k: round(v, 2) for k, v in scores.items()},
         )
-        return best_angle, upright_aspect, fx, fy
+        return best_angle, upright_aspect
 
     def _scan_video_pose_windows(
         self,
@@ -430,12 +394,9 @@ class OllamaVisionScorer:
         Analyse un rush vidéo à 4 Hz (toutes les 0.25s) après l'avoir remis dans le bon sens :
           1. Détecte l'orientation réelle (`rotation_correction` 0/90/180/270) et le format (`9:16` ou `16:9`)
           2. Identifie le plan d'intro (entre 2.6s et 5.0s)
-          3. Identifie toutes les fenêtres de posing verrouillées et calcule le centre `(focus_x, focus_y)`
-             du corps de l'athlète pour garantir un cadrage centré sans couper le sujet.
+          3. Identifie toutes les fenêtres de posing verrouillées (sans rognage ni recadrage).
         """
-        rot_corr, upright_aspect, base_fx, base_fy = self._detect_video_orientation_and_framing(
-            video_path
-        )
+        rot_corr, upright_aspect = self._detect_video_orientation_and_framing(video_path)
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -450,7 +411,6 @@ class OllamaVisionScorer:
         motions: List[float] = []
         gradients: List[float] = []
         descriptors: List[np.ndarray] = []
-        centroids: List[Tuple[float, float]] = []
 
         prev_roi: Optional[np.ndarray] = None
         frame_idx = 0
@@ -481,19 +441,7 @@ class OllamaVisionScorer:
                     # Énergie des contours musculaires (ombres/lumières zénithales sur le buste)
                     gx = cv2.Sobel(roi, cv2.CV_32F, 1, 0, ksize=3)
                     gy = cv2.Sobel(roi, cv2.CV_32F, 0, 1, ksize=3)
-                    mag = np.hypot(gx, gy)
-                    grad = float(np.mean(mag))
-
-                    # Calcul du centre de gravité local du buste pour un cadrage toujours centré
-                    mag_sum = float(np.sum(mag))
-                    if mag_sum > 1e-3:
-                        ry, rx = np.indices(mag.shape)
-                        local_cx = 0.12 + 0.76 * (float(np.sum(rx * mag)) / (mag_sum * mag.shape[1]))
-                        local_cy = 0.20 + 0.60 * (float(np.sum(ry * mag)) / (mag_sum * mag.shape[0]))
-                        fx = float(np.clip(0.55 * base_fx + 0.45 * local_cx, 0.22, 0.78))
-                        fy = float(np.clip(0.60 * base_fy + 0.40 * local_cy, 0.35, 0.56))
-                    else:
-                        fx, fy = base_fx, base_fy
+                    grad = float(np.mean(np.hypot(gx, gy)))
 
                     # Descripteur de posture 16x16 normalisé (pour différencier les poses entre elles)
                     desc = cv2.resize(roi, (16, 16)).astype(np.float32).flatten()
@@ -506,7 +454,6 @@ class OllamaVisionScorer:
                     motions.append(mot)
                     gradients.append(grad)
                     descriptors.append(desc)
-                    centroids.append((fx, fy))
 
                 frame_idx += 1
         finally:
@@ -532,7 +479,6 @@ class OllamaVisionScorer:
             intro_start = 2.65
             intro_end = min(duration - 1.0, 5.20)
             intro_idx = int(np.argmin(np.abs(t_arr - 3.4)))
-            intro_fx, intro_fy = centroids[intro_idx]
             intro_cand = PoseCandidateWindow(
                 video_path=video_path,
                 center_time=3.4,
@@ -546,8 +492,6 @@ class OllamaVisionScorer:
                 pose_label="Intro / Mise en place",
                 rotation_correction=rot_corr,
                 upright_aspect_ratio=upright_aspect,
-                focus_x=intro_fx,
-                focus_y=intro_fy,
             )
 
         # 2. Scoring de chaque instant pour détecter les "Pose Locks" (contractions tenues)
@@ -597,7 +541,6 @@ class OllamaVisionScorer:
             # Le début de la pose commence légèrement avant le verrouillage (~0.8s avant t_center)
             seg_start = max(safe_start - 0.5, t_center - 1.1)
             seg_end = min(duration - 0.2, seg_start + 4.5)
-            cand_fx, cand_fy = centroids[sample_idx]
 
             candidates.append(
                 PoseCandidateWindow(
@@ -613,8 +556,6 @@ class OllamaVisionScorer:
                     pose_label=f"Pose Aesthetic #{rank_idx + 1}",
                     rotation_correction=rot_corr,
                     upright_aspect_ratio=upright_aspect,
-                    focus_x=cand_fx,
-                    focus_y=cand_fy,
                 )
             )
 

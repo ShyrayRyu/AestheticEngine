@@ -1,14 +1,14 @@
 """
-Moteur de Montage Vidéo & Synchronisation Beat-Cut via FFmpeg Natif (Sans Étirement, Sans Transition).
-------------------------------------------------------------------------------------------------------
-Pourquoi FFmpeg natif au lieu de MoviePy 1.0.3 pour le recadrage et la concaténation :
+Moteur de Montage Vidéo & Synchronisation Beat-Cut via FFmpeg Natif (Sans Rognage, Sans Étirement, Sans Transition).
+--------------------------------------------------------------------------------------------------------------------
+Pourquoi FFmpeg natif au lieu de MoviePy 1.0.3 :
   - Les vidéos filmées au smartphone (iPhone, Xiaomi, Samsung) en vertical 9:16 sont stockées
     en `1920x1080` avec une métadonnée `Display Matrix: rotation = -90`. MoviePy 1.0.3 lit
     `1920x1080` de manière erronée et étire horizontalement l'image d'un facteur 1.78x.
   - FFmpeg applique automatiquement la rotation de la Display Matrix AVANT le graphe de filtres `-vf`.
-  - Le filtre `crop='min(iw,ih*R)':'min(ih,iw/R)',scale=W:H:flags=lanczos,setsar=1` garantit
-    mathématiquement un **rognage centré pur (SAR 1:1)** en `9:16` (1080x1920) ou `16:9` (1920x1080)
-    sans **aucun étirement** des proportions musculaires.
+  - Aucun rognage (`crop`) ni recadrage automatique n'est appliqué : l'intégralité de l'image
+    source est conservée à 100 % en `9:16` (1080x1920) ou `16:9` (1920x1080) grâce à l'interchange
+    automatique `9:16 <-> 16:9` et au filtre `scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2:black,setsar=1`.
   - La concaténation utilise des **coupes franches ("Hard Cuts", sans transition)** synchronisées
     à la frame près sur les timestamps des Beat Drops, exactement comme dans `exemple.mp4`.
 """
@@ -106,7 +106,7 @@ class SpeedRampVideoEditor:
                 )
                 progress_callback(
                     f"Découpe plan #{idx + 1}/{len(intervals)} ({seg.pose_label}) "
-                    f"→ [{t_start_tl:.2f}s - {t_end_tl:.2f}s] ({aspect_ratio} bien cadré{rot_info})",
+                    f"→ [{t_start_tl:.2f}s - {t_end_tl:.2f}s] ({aspect_ratio} sans rognage{rot_info})",
                     pct,
                 )
 
@@ -434,11 +434,11 @@ class SpeedRampVideoEditor:
         aspect_ratio: Literal["9:16", "16:9"],
     ) -> str:
         """
-        Construit la chaîne de filtres vidéo FFmpeg pour un segment donné :
+        Construit la chaîne de filtres vidéo FFmpeg pour un segment donné SANS AUCUN ROGNAGE NI RECADRAGE :
           1. Redressement automatique dans le bon sens si l'IA a détecté une rotation
              (`90°` -> `transpose=1`, `270°` -> `transpose=2`, `180°` -> `hflip,vflip`).
-          2. Rognage intelligent centré sur le buste/visage de l'athlète `(focus_x, focus_y)`
-             sans aucun étirement (`setsar=1`) au format `9:16` (1080x1920) ou `16:9` (1920x1080).
+          2. Mise à l'échelle intégrale (100 % de l'image conservée, zéro `crop`, zéro étirement `setsar=1`)
+             au format `9:16` (1080x1920) ou `16:9` (1920x1080).
         """
         rot = seg.rotation_correction % 360
         rot_prefix = ""
@@ -449,23 +449,18 @@ class SpeedRampVideoEditor:
         elif rot == 180:
             rot_prefix = "hflip,vflip,"
 
-        fx = max(0.15, min(0.85, float(seg.focus_x)))
-        fy = max(0.20, min(0.80, float(seg.focus_y)))
-
         if aspect_ratio == "16:9":
-            crop_scale = (
-                f"crop=w='min(iw,ih*16/9)':h='min(ih,iw*9/16)':"
-                f"x='clip(iw*{fx:.3f}-ow/2,0,iw-ow)':y='clip(ih*{fy:.3f}-oh/2,0,ih-oh)',"
-                f"scale=1920:1080:flags=lanczos,setsar=1"
+            full_frame_scale = (
+                "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos,"
+                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
             )
         else:
-            crop_scale = (
-                f"crop=w='min(iw,ih*9/16)':h='min(ih,iw*16/9)':"
-                f"x='clip(iw*{fx:.3f}-ow/2,0,iw-ow)':y='clip(ih*{fy:.3f}-oh/2,0,ih-oh)',"
-                f"scale=1080:1920:flags=lanczos,setsar=1"
+            full_frame_scale = (
+                "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+                "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
             )
 
-        return f"{rot_prefix}{crop_scale}"
+        return f"{rot_prefix}{full_frame_scale}"
 
     @staticmethod
     def _get_video_duration(video_path: Path) -> float:

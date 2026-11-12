@@ -53,8 +53,6 @@ export interface SelectedVideoSegment {
   speed_slow_factor: number
   rotation_correction?: number
   upright_aspect_ratio?: AspectRatioOption
-  focus_x?: number
-  focus_y?: number
 }
 
 export interface InspirationAnalysisResult {

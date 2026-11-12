@@ -688,10 +688,10 @@ onUnmounted(() => {
             </h2>
           </div>
 
-          <!-- Choix du Format : 9:16 ou 16:9 (Rognage centré, jamais étiré) -->
+          <!-- Choix du Format : 9:16 ou 16:9 (Sans rognage ni recadrage) -->
           <div>
             <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">
-              Format d'image (Rognage centré, sans étirement)
+              Format d'image (Sans rognage ni étirement)
             </label>
             <div class="grid grid-cols-2 gap-3">
               <button
@@ -723,16 +723,16 @@ onUnmounted(() => {
               </button>
             </div>
 
-            <!-- Détection IA du bon sens & Interchange auto 9:16 <-> 16:9 -->
+            <!-- Détection IA du bon sens & Interchange auto 9:16 <-> 16:9 (Sans rognage) -->
             <label
               class="mt-2.5 flex items-center justify-between rounded-xl border border-zinc-800/90 bg-zinc-950/60 px-3.5 py-2.5 cursor-pointer"
             >
               <div>
                 <span class="text-xs font-bold text-zinc-200 block">
-                  IA Sens & Cadrage Auto (Interchange 9:16 ↔ 16:9)
+                  IA Sens Auto (Interchange 9:16 ↔ 16:9 sans rogner)
                 </span>
                 <span class="text-[11px] text-zinc-500">
-                  Détecte si la vidéo est tournée, la remet à l'endroit et bascule entre 9:16 et 16:9 pour bien cadrer l'athlète
+                  Reconnaît le sens de la vidéo et bascule entre 9:16 et 16:9 sans rogner ni recadrer l'image
                 </span>
               </div>
               <input

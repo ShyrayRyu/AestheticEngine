@@ -83,18 +83,6 @@ class SelectedVideoSegment(BaseModel):
         default="9:16",
         description="Format natif détecté une fois la vidéo remise dans le bon sens (9:16 ou 16:9)",
     )
-    focus_x: float = Field(
-        default=0.5,
-        ge=0.0,
-        le=1.0,
-        description="Centre horizontal normalisé (0..1) de l'athlète pour un cadrage intelligent",
-    )
-    focus_y: float = Field(
-        default=0.45,
-        ge=0.0,
-        le=1.0,
-        description="Centre vertical normalisé (0..1) de l'athlète pour un cadrage intelligent",
-    )
 
 
 class InspirationAnalysisResult(BaseModel):
@@ -121,11 +109,11 @@ class ProcessProjectRequest(BaseModel):
 
     aspect_ratio: Literal["9:16", "16:9"] = Field(
         default="9:16",
-        description="Format de sortie : 9:16 (Vertical TikTok 1080x1920) ou 16:9 (Paysage 1920x1080), par rognage centré sans étirement.",
+        description="Format de sortie : 9:16 (Vertical TikTok 1080x1920) ou 16:9 (Paysage 1920x1080), sans rognage ni étirement.",
     )
     auto_orient_and_frame: bool = Field(
         default=True,
-        description="Reconnaissance IA du bon sens de la vidéo (0°/90°/180°/270°), interchange automatique entre 9:16 et 16:9 si nécessaire, et cadrage centré sur l'athlète.",
+        description="Reconnaissance IA du bon sens de la vidéo (0°/90°/180°/270°) et interchange automatique entre 9:16 et 16:9 sans rogner ni recadrer.",
     )
     editing_mode: Literal["pose_cut", "speed_ramp"] = Field(
         default="pose_cut",
