@@ -83,6 +83,14 @@ class SelectedVideoSegment(BaseModel):
         default="9:16",
         description="Format natif détecté une fois la vidéo remise dans le bon sens (9:16 ou 16:9)",
     )
+    thumbnail_url: Optional[str] = Field(
+        default=None,
+        description="URL de l'aperçu / vignette de la pose sélectionnée",
+    )
+    hold_duration: Optional[float] = Field(
+        default=None,
+        description="Durée réelle de la contraction musculaire isométrique verrouillée (secondes)",
+    )
 
 
 class InspirationAnalysisResult(BaseModel):

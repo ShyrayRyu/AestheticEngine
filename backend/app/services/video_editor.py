@@ -114,13 +114,23 @@ class SpeedRampVideoEditor:
 
             if editing_mode == "pose_cut" or idx == 0:
                 # Mode Posing 1.0x (Style exemple.mp4) :
-                # On centre la fenêtre autour du verrouillage de pose pour capter la mise en tension
-                # suivie du maintien de la contraction pendant toute la durée `slot_duration`.
+                # Découpage strict au cœur du plateau de contraction isométrique verrouillé
+                # (Zéro transition, zéro mouvement de préparation, zéro relâchement).
+                hold_len = max(0.5, seg.end_time - seg.start_time)
                 if idx == 0 and seg.pose_label.startswith("Intro"):
                     clip_start = max(0.0, seg.start_time)
+                    if clip_start + slot_duration > src_duration - 0.1:
+                        clip_start = max(0.0, src_duration - slot_duration - 0.1)
+                elif slot_duration <= hold_len:
+                    # Le créneau musical tient entièrement dans la pose verrouillée :
+                    # On centre parfaitement la coupe à l'intérieur du plateau de contraction !
+                    margin = (hold_len - slot_duration) / 2.0
+                    clip_start = seg.start_time + margin
                 else:
-                    # On démarre ~35% avant le center_time pour voir l'entrée dans la pose puis le lock
-                    clip_start = max(0.0, seg.peak_time_in_source - 0.35 * slot_duration)
+                    # Si le créneau est plus long que la pose, on cale le début dès le verrouillage
+                    clip_start = max(0.0, seg.start_time)
+                    if clip_start + slot_duration > src_duration - 0.1:
+                        clip_start = max(0.0, src_duration - slot_duration - 0.1)
 
                 if clip_start + slot_duration > src_duration - 0.1:
                     clip_start = max(0.0, src_duration - slot_duration - 0.1)

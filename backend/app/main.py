@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import subprocess
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -304,6 +305,62 @@ async def download_premiere_xml(project_id: str) -> FileResponse:
     )
 
 
+@app.get("/api/v1/projects/{project_id}/thumbnails/{thumb_idx}", tags=["Exports"])
+async def get_segment_thumbnail(project_id: str, thumb_idx: int) -> FileResponse:
+    """Sert la vignette JPEG correspondant au plan sélectionné."""
+    thumb_path = settings.exports_dir / project_id / "thumbnails" / f"thumb_{thumb_idx}.jpg"
+    if not thumb_path.exists():
+        raise HTTPException(status_code=404, detail=f"Vignette #{thumb_idx} introuvable.")
+    return FileResponse(
+        path=thumb_path,
+        media_type="image/jpeg",
+        filename=thumb_path.name,
+    )
+
+
+def _extract_segment_thumbnail(
+    src_video: Path,
+    peak_time: float,
+    rotation: int,
+    output_path: Path,
+) -> bool:
+    """Extrait une vignette JPEG (360x640) au pic de contraction de la pose."""
+    try:
+        rot_filter = ""
+        if rotation == 90:
+            rot_filter = "transpose=1,"
+        elif rotation == 180:
+            rot_filter = "transpose=2,transpose=2,"
+        elif rotation == 270:
+            rot_filter = "transpose=2,"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{max(0.0, peak_time):.3f}",
+            "-i",
+            str(src_video),
+            "-vf",
+            f"{rot_filter}scale=360:640:force_original_aspect_ratio=decrease",
+            "-vframes",
+            "1",
+            "-q:v",
+            "3",
+            str(output_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, timeout=10)
+        return res.returncode == 0 and output_path.exists()
+    except Exception as exc:
+        logger.warning(
+            "Échec extraction vignette pour %s @%.1fs : %s",
+            src_video.name,
+            peak_time,
+            exc,
+        )
+        return False
+
+
 def _update_project(
     project_id: str,
     stage: PipelineStage,
@@ -464,6 +521,22 @@ async def _run_full_editing_pipeline(
             include_intro_shot=options.include_intro_shot,
             progress_callback=on_vision_progress,
         )
+
+        # Génération des vignettes des poses sélectionnées (frame au pic de contraction)
+        thumbs_dir = export_project_dir / "thumbnails"
+        thumbs_dir.mkdir(parents=True, exist_ok=True)
+        for idx, seg in enumerate(selected_segments):
+            thumb_path = thumbs_dir / f"thumb_{idx}.jpg"
+            await asyncio.to_thread(
+                _extract_segment_thumbnail,
+                Path(seg.source_video),
+                seg.peak_time_in_source,
+                seg.rotation_correction,
+                thumb_path,
+            )
+            if thumb_path.exists():
+                seg.thumbnail_url = f"/api/v1/projects/{project_id}/thumbnails/{idx}"
+
         project.frame_scores = frame_scores
         project.selected_segments = selected_segments
 

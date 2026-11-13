@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Literal, Optional, Tuple
@@ -180,6 +181,7 @@ class OllamaVisionScorer:
                     max_effort_score=8.5,
                     rotation_correction=intro_candidate.rotation_correction,
                     upright_aspect_ratio=intro_candidate.upright_aspect_ratio,
+                    hold_duration=round(intro_candidate.end_time - intro_candidate.start_time, 2),
                 )
             )
 
@@ -195,6 +197,7 @@ class OllamaVisionScorer:
                         max_effort_score=round(pose_win.score, 1),
                         rotation_correction=pose_win.rotation_correction,
                         upright_aspect_ratio=pose_win.upright_aspect_ratio,
+                        hold_duration=round(pose_win.end_time - pose_win.start_time, 2),
                     )
                 )
 
@@ -388,178 +391,357 @@ class OllamaVisionScorer:
     def _scan_video_pose_windows(
         self,
         video_path: Path,
-        max_candidates: int = 12,
+        max_candidates: int = 16,
     ) -> Tuple[List[PoseCandidateWindow], Optional[PoseCandidateWindow]]:
         """
-        Analyse un rush vidéo à 4 Hz (toutes les 0.25s) après l'avoir remis dans le bon sens :
-          1. Détecte l'orientation réelle (`rotation_correction` 0/90/180/270) et le format (`9:16` ou `16:9`)
-          2. Identifie le plan d'intro (entre 2.6s et 5.0s)
-          3. Identifie toutes les fenêtres de posing verrouillées (sans rognage ni recadrage).
+        Analyse approfondie du rush vidéo pour détecter les véritables contractions musculaires :
+          1. Détecte et applique l'orientation réelle (remet l'athlète debout à l'endroit).
+          2. Extrait à haute vitesse (FFmpeg rawvideo pipe à 4 Hz) les flux de mouvement et de contour.
+          3. Détecte les vrais plateaux isométriques ("Pose Locks") : les moments où l'athlète maintient
+             une contraction ferme (> 1.6s) après être entré dans la pose, avec forte netteté musculaire
+             et déploiement de la silhouette (bras levés, dos déployé, abdos contractés).
+          4. Isole automatiquement le plan d'intro réel (la mise en place sous le spot juste avant la 1re pose,
+             en éliminant tout réglage de caméra / écran au début).
         """
         rot_corr, upright_aspect = self._detect_video_orientation_and_framing(video_path)
 
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
+        # 1. Décodage ultra-rapide des frames basse résolution (90x160) à 2 Hz via FFmpeg
+        w_small, h_small = 90, 160
+        fps_s = 2.0
+        frames_array = self._extract_fast_grayscale_frames(
+            video_path=video_path,
+            rotation_correction=rot_corr,
+            target_w=w_small,
+            target_h=h_small,
+            fps_sample=fps_s,
+        )
+
+        n_frames = len(frames_array)
+        duration = n_frames / fps_s if n_frames > 0 else 0.0
+
+        if n_frames < 8:
             return [], None
 
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
-        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        duration = n_frames / fps if fps > 0 else 0.0
+        # 2. Vitesse de mouvement inter-trames & lissage
+        diffs = np.mean(
+            np.abs(frames_array[1:].astype(np.float32) - frames_array[:-1].astype(np.float32)),
+            axis=(1, 2),
+        )
+        kernel = np.ones(3, dtype=np.float32) / 3.0
+        smooth_mot = np.convolve(diffs, kernel, mode="same")
 
-        step_frames = max(1, int(round(fps * self.sample_interval_sec)))
-        times: List[float] = []
-        motions: List[float] = []
-        gradients: List[float] = []
-        descriptors: List[np.ndarray] = []
+        # 3. Gradient musculaire (Sobel) sur la région du buste et des bras (y: 20%..80%, x: 10%..90%)
+        torso = frames_array[:, int(h_small * 0.20) : int(h_small * 0.80), int(w_small * 0.10) : int(w_small * 0.90)]
+        gx = np.abs(torso[:, :, 1:].astype(np.float32) - torso[:, :, :-1].astype(np.float32))
+        gy = np.abs(torso[:, 1:, :].astype(np.float32) - torso[:, :-1, :].astype(np.float32))
+        grad_energy = gx[:, :-1, :].mean(axis=(1, 2)) + gy[:, :, :-1].mean(axis=(1, 2))
+        smooth_grad = np.convolve(grad_energy, kernel, mode="same")
 
-        prev_roi: Optional[np.ndarray] = None
-        frame_idx = 0
+        # 4. Envergure de la silhouette (largeur du corps lors des poses: lat spread, double biceps...)
+        bg_est = np.median(frames_array[::max(1, int(fps_s * 2))], axis=0)
+        fg_mask = np.abs(frames_array.astype(np.float32) - bg_est[np.newaxis, :, :]) > 18.0
+        upper_fg = fg_mask[:, int(h_small * 0.18) : int(h_small * 0.72), :]
+        body_width = np.sum(np.any(upper_fg, axis=1), axis=1)
 
-        try:
-            while True:
-                ret, raw_frame = cap.read()
-                if not ret:
-                    break
-                if frame_idx % step_frames == 0:
-                    t = frame_idx / fps
-                    frame = self._rotate_frame_cw(raw_frame, rot_corr)
-                    h, w = frame.shape[:2]
-                    # Redimensionnement rapide pour l'analyse de mouvement et de silhouette
-                    small_w, small_h = (90, 160) if h >= w else (160, 90)
-                    small = cv2.resize(frame, (small_w, small_h))
-                    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        # 5. Seuil de mouvement adaptatif : un plateau isométrique a un mouvement sous le 35e centile
+        p35 = float(np.percentile(smooth_mot, 35))
+        mot_thresh = max(2.5, min(4.9, p35 * 1.30))
 
-                    # Région d'intérêt centrée sur le buste et les bras (20% -> 80% vertical)
-                    roi = gray[
-                        int(small_h * 0.20) : int(small_h * 0.80),
-                        int(small_w * 0.12) : int(small_w * 0.88),
-                    ]
+        # Fenêtre de sécurité : ignore le réglage de la caméra / téléphone au tout début
+        start_guard = 12.0 if duration > 25.0 else (5.0 if duration > 14.0 else 0.5)
+        end_guard = max(start_guard + 2.0, duration - 3.5)
 
-                    mot = float(np.mean(cv2.absdiff(roi, prev_roi))) if prev_roi is not None else 0.0
-                    prev_roi = roi
+        raw_holds: List[dict] = []
+        in_hold = False
+        s_idx = 0
 
-                    # Énergie des contours musculaires (ombres/lumières zénithales sur le buste)
-                    gx = cv2.Sobel(roi, cv2.CV_32F, 1, 0, ksize=3)
-                    gy = cv2.Sobel(roi, cv2.CV_32F, 0, 1, ksize=3)
-                    grad = float(np.mean(np.hypot(gx, gy)))
-
-                    # Descripteur de posture 16x16 normalisé (pour différencier les poses entre elles)
-                    desc = cv2.resize(roi, (16, 16)).astype(np.float32).flatten()
-                    desc -= float(np.mean(desc))
-                    norm = float(np.linalg.norm(desc))
-                    if norm > 1e-6:
-                        desc /= norm
-
-                    times.append(t)
-                    motions.append(mot)
-                    gradients.append(grad)
-                    descriptors.append(desc)
-
-                frame_idx += 1
-        finally:
-            cap.release()
-
-        if len(times) < 6:
-            return [], None
-
-        t_arr = np.array(times, dtype=np.float32)
-        m_arr = np.array(motions, dtype=np.float32)
-        g_arr = np.array(gradients, dtype=np.float32)
-
-        # Lissage sur une fenêtre de 1.5s (6 échantillons à 4 Hz)
-        kernel = np.ones(6, dtype=np.float32) / 6.0
-        smooth_mot = np.convolve(m_arr, kernel, mode="same")
-        smooth_grad = np.convolve(g_arr, kernel, mode="same")
-
-        grad_min, grad_ptp = float(np.min(smooth_grad)), float(np.ptp(smooth_grad)) + 1e-6
-
-        # 1. Détection du plan d'Intro (entre 2.6s et 5.0s si le rush fait plus de 15s)
-        intro_cand: Optional[PoseCandidateWindow] = None
-        if duration >= 15.0:
-            intro_start = 2.65
-            intro_end = min(duration - 1.0, 5.20)
-            intro_idx = int(np.argmin(np.abs(t_arr - 3.4)))
-            intro_cand = PoseCandidateWindow(
-                video_path=video_path,
-                center_time=3.4,
-                start_time=intro_start,
-                end_time=intro_end,
-                score=0.90,
-                motion_val=float(smooth_mot[intro_idx]),
-                gradient_val=float(smooth_grad[intro_idx]),
-                descriptor=descriptors[intro_idx],
-                is_intro=True,
-                pose_label="Intro / Mise en place",
-                rotation_correction=rot_corr,
-                upright_aspect_ratio=upright_aspect,
-            )
-
-        # 2. Scoring de chaque instant pour détecter les "Pose Locks" (contractions tenues)
-        # On ignore les premières 5.5s (déjà couvertes par l'intro/téléphone) et les dernières 6s
-        safe_start = 5.5 if duration > 20.0 else 0.5
-        safe_end = max(safe_start + 2.0, duration - 6.0) if duration > 20.0 else duration - 0.5
-
-        pose_scores = np.zeros_like(t_arr)
-        for i, t_val in enumerate(t_arr):
-            if t_val < safe_start or t_val > safe_end:
+        for i in range(len(smooth_mot)):
+            t = i / fps_s
+            if t < start_guard or t > end_guard:
+                if in_hold:
+                    in_hold = False
                 continue
 
-            m_val = float(smooth_mot[i])
-            # Une pose maintenue a un mouvement modéré et contrôlé (entre 1.1 et 2.9)
-            if 1.1 <= m_val <= 2.9:
-                hold_score = 1.0 - abs(m_val - 1.85) / 1.5
+            is_still = bool(smooth_mot[i] < mot_thresh)
+            if is_still:
+                if not in_hold:
+                    in_hold = True
+                    s_idx = i
             else:
-                hold_score = max(0.0, 1.0 - abs(m_val - 1.85) / 3.2)
+                if in_hold:
+                    in_hold = False
+                    hold_len = (i - s_idx) / fps_s
+                    if hold_len >= 1.6:
+                        raw_holds.append(
+                            self._build_hold_record(
+                                frames_array=frames_array,
+                                smooth_mot=smooth_mot,
+                                smooth_grad=smooth_grad,
+                                body_width=body_width,
+                                s_idx=s_idx,
+                                e_idx=i,
+                                fps_s=fps_s,
+                                w_small=w_small,
+                            )
+                        )
 
-            # Bonus si l'athlète vient d'entrer dans la pose (mouvement d'amorce 0.5s à 2.5s avant)
-            pre_slice = m_arr[max(0, i - 10) : max(1, i - 1)]
-            entry_motion = float(np.max(pre_slice)) if pre_slice.size > 0 else 2.0
-            entry_bonus = float(np.clip((entry_motion - 1.5) / 3.5, 0.2, 1.0))
+        if in_hold and (len(smooth_mot) - s_idx) / fps_s >= 1.6:
+            raw_holds.append(
+                self._build_hold_record(
+                    frames_array=frames_array,
+                    smooth_mot=smooth_mot,
+                    smooth_grad=smooth_grad,
+                    body_width=body_width,
+                    s_idx=s_idx,
+                    e_idx=len(smooth_mot),
+                    fps_s=fps_s,
+                    w_small=w_small,
+                )
+            )
 
-            # Netteté musculaire / contraste sous le spot lumineux
-            norm_grad = (float(smooth_grad[i]) - grad_min) / grad_ptp
+        # Si aucun hold strict n'a été trouvé (ex: rush court très actif), on élargit le seuil
+        if not raw_holds:
+            logger.warning("Aucun plateau isométrique strict détecté — recherche assouplie...")
+            mot_thresh_relaxed = max(4.0, float(np.median(smooth_mot)))
+            in_hold = False
+            s_idx = 0
+            for i in range(len(smooth_mot)):
+                t = i / fps_s
+                if t < 1.0 or t > duration - 1.0:
+                    continue
+                if smooth_mot[i] < mot_thresh_relaxed:
+                    if not in_hold:
+                        in_hold = True
+                        s_idx = i
+                else:
+                    if in_hold:
+                        in_hold = False
+                        hold_len = (i - s_idx) / fps_s
+                        if hold_len >= 1.2:
+                            raw_holds.append(
+                                self._build_hold_record(
+                                    frames_array=frames_array,
+                                    smooth_mot=smooth_mot,
+                                    smooth_grad=smooth_grad,
+                                    body_width=body_width,
+                                    s_idx=s_idx,
+                                    e_idx=i,
+                                    fps_s=fps_s,
+                                    w_small=w_small,
+                                )
+                            )
 
-            pose_scores[i] = 0.50 * hold_score + 0.30 * entry_bonus + 0.20 * norm_grad
+        # 6. Détection intelligente du plan d'Intro (la mise en place sous le spot)
+        intro_cand: Optional[PoseCandidateWindow] = None
+        if raw_holds and duration >= 14.0:
+            first_hold_start = min(h["start"] for h in raw_holds)
+            if first_hold_start >= 4.0:
+                intro_end = round(max(2.0, first_hold_start - 0.35), 3)
+                intro_start = round(max(0.5, intro_end - 2.5), 3)
+            else:
+                intro_start = 0.5
+                intro_end = min(duration - 1.0, 2.8)
+        else:
+            intro_start = 0.5
+            intro_end = min(duration - 1.0, 2.8)
 
-        # 3. Extraction des pics locaux espacés d'au moins 5.5s dans un même rush
-        min_gap_sec = 5.5 if duration > 35.0 else 2.5
-        sorted_indices = np.argsort(pose_scores)[::-1]
-        selected_indices: List[int] = []
+        intro_cand = PoseCandidateWindow(
+            video_path=video_path,
+            center_time=round((intro_start + intro_end) / 2.0, 3),
+            start_time=intro_start,
+            end_time=intro_end,
+            score=0.92,
+            motion_val=1.5,
+            gradient_val=float(np.mean(smooth_grad)),
+            descriptor=np.zeros(256, dtype=np.float32),
+            is_intro=True,
+            pose_label="Intro / Mise en place",
+            rotation_correction=rot_corr,
+            upright_aspect_ratio=upright_aspect,
+        )
 
-        for idx in sorted_indices:
-            if pose_scores[idx] <= 0.15:
-                break
-            t_cand = float(t_arr[idx])
-            if all(abs(t_cand - float(t_arr[sel])) >= min_gap_sec for sel in selected_indices):
-                selected_indices.append(int(idx))
-                if len(selected_indices) >= max_candidates:
+        # 7. Tri par score biomécanique et élimination des doublons temporels
+        raw_holds.sort(key=lambda h: float(h["score"]), reverse=True)
+        selected_holds: List[dict] = []
+        min_gap_sec = 4.0 if duration > 30.0 else 1.8
+
+        for h in raw_holds:
+            c_t = float(h["mid"])
+            if all(abs(c_t - float(sel["mid"])) >= min_gap_sec for sel in selected_holds):
+                selected_holds.append(h)
+                if len(selected_holds) >= max_candidates:
                     break
 
         candidates: List[PoseCandidateWindow] = []
-        for rank_idx, sample_idx in enumerate(selected_indices):
-            t_center = float(t_arr[sample_idx])
-            # Le début de la pose commence légèrement avant le verrouillage (~0.8s avant t_center)
-            seg_start = max(safe_start - 0.5, t_center - 1.1)
-            seg_end = min(duration - 0.2, seg_start + 4.5)
-
+        for rank_idx, h in enumerate(selected_holds):
             candidates.append(
                 PoseCandidateWindow(
                     video_path=video_path,
-                    center_time=t_center,
-                    start_time=seg_start,
-                    end_time=seg_end,
-                    score=float(pose_scores[sample_idx]),
-                    motion_val=float(smooth_mot[sample_idx]),
-                    gradient_val=float(smooth_grad[sample_idx]),
-                    descriptor=descriptors[sample_idx],
+                    center_time=h["mid"],
+                    start_time=h["start"],
+                    end_time=h["end"],
+                    score=h["score"],
+                    motion_val=h["mot"],
+                    gradient_val=h["grad"],
+                    descriptor=h["desc"],
                     is_intro=False,
-                    pose_label=f"Pose Aesthetic #{rank_idx + 1}",
+                    pose_label=h["label"],
                     rotation_correction=rot_corr,
                     upright_aspect_ratio=upright_aspect,
                 )
             )
 
+        logger.info(
+            "Rush '%s' : %d vraies poses verrouillées détectées (intro @ %.1f-%.1fs, 1re pose @ %.1fs)",
+            video_path.name,
+            len(candidates),
+            intro_start,
+            intro_end,
+            candidates[0].start_time if candidates else 0.0,
+        )
         return candidates, intro_cand
+
+    def _build_hold_record(
+        self,
+        frames_array: np.ndarray,
+        smooth_mot: np.ndarray,
+        smooth_grad: np.ndarray,
+        body_width: np.ndarray,
+        s_idx: int,
+        e_idx: int,
+        fps_s: float,
+        w_small: int,
+    ) -> dict:
+        """Construit l'analyse détaillée d'un plateau isométrique."""
+        h_start = round(s_idx / fps_s, 3)
+        h_end = round(e_idx / fps_s, 3)
+        h_len = round(h_end - h_start, 3)
+        avg_g = float(np.mean(smooth_grad[s_idx:e_idx]))
+        avg_m = float(np.mean(smooth_mot[s_idx:e_idx]))
+        avg_w = float(np.mean(body_width[s_idx:e_idx]))
+        mid_idx = (s_idx + e_idx) // 2
+        mid_t = round(mid_idx / fps_s, 3)
+
+        # Descripteur de silhouette normalisé 16x16
+        desc = cv2.resize(frames_array[mid_idx], (16, 16)).astype(np.float32).flatten()
+        desc -= float(np.mean(desc))
+        norm_d = float(np.linalg.norm(desc))
+        if norm_d > 1e-5:
+            desc /= norm_d
+
+        # Score qualité de pose : longue tenue stable + forte définition musculaire + silhouette déployée
+        score = float(
+            (avg_g * 0.45)
+            + (avg_w * 0.35)
+            + (min(8.0, h_len) * 2.5)
+            - (avg_m * 2.5)
+        )
+
+        # Classification morphologique de la pose selon le gabarit de la silhouette
+        label = self._classify_pose_silhouette(
+            width_ratio=avg_w / float(w_small),
+            grad_val=avg_g,
+        )
+
+        return {
+            "start": h_start,
+            "end": h_end,
+            "dur": h_len,
+            "mid": mid_t,
+            "grad": avg_g,
+            "mot": avg_m,
+            "width": avg_w,
+            "score": score,
+            "desc": desc,
+            "label": label,
+        }
+
+    @staticmethod
+    def _classify_pose_silhouette(width_ratio: float, grad_val: float) -> str:
+        """Détermine le type de pose musculation selon le gabarit et les reliefs."""
+        if width_ratio >= 0.72:
+            return "Front Double Biceps / Lat Spread"
+        if width_ratio >= 0.62:
+            if grad_val >= 18.0:
+                return "Most Muscular (Crab / Flex)"
+            return "Front Lat Spread (V-Taper)"
+        if width_ratio <= 0.48:
+            return "Side Chest & Biceps Lock"
+        if grad_val >= 17.0:
+            return "Abdominals & Thighs Flex"
+        return "Classic Aesthetic Pose"
+
+    def _extract_fast_grayscale_frames(
+        self,
+        video_path: Path,
+        rotation_correction: int,
+        target_w: int,
+        target_h: int,
+        fps_sample: float = 2.0,
+    ) -> np.ndarray:
+        """
+        Extrait rapidement les frames basse résolution via FFmpeg pipe.
+        Échelonne d'abord en basse résolution avant d'appliquer la rotation
+        pour une exécution ultra-rapide même sur les rushs de 10+ minutes.
+        """
+        rot = rotation_correction % 360
+        if rot == 90:
+            vf = f"fps={fps_sample},scale={target_h}:{target_w},transpose=1,format=gray"
+        elif rot == 270:
+            vf = f"fps={fps_sample},scale={target_h}:{target_w},transpose=2,format=gray"
+        elif rot == 180:
+            vf = f"fps={fps_sample},scale={target_w}:{target_h},hflip,vflip,format=gray"
+        else:
+            vf = f"fps={fps_sample},scale={target_w}:{target_h},format=gray"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-threads",
+            "0",
+            "-i",
+            str(video_path),
+            "-vf",
+            vf,
+            "-f",
+            "rawvideo",
+            "-",
+        ]
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            raw_bytes, _ = p.communicate(timeout=300.0)
+            if p.returncode == 0 and len(raw_bytes) >= target_w * target_h * 4:
+                frame_size = target_w * target_h
+                n = len(raw_bytes) // frame_size
+                return np.frombuffer(raw_bytes[: n * frame_size], dtype=np.uint8).reshape((n, target_h, target_w))
+        except Exception as e:
+            logger.warning("Échec de l'extraction FFmpeg rapide (%s), repli sur OpenCV.", e)
+
+        # Repli OpenCV séquentiel
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return np.zeros((0, target_h, target_w), dtype=np.uint8)
+
+        fps_vid = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        step = max(1, int(round(fps_vid / fps_sample)))
+        frames_list: List[np.ndarray] = []
+        idx = 0
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if idx % step == 0:
+                    if rot != 0:
+                        frame = self._rotate_frame_cw(frame, rot)
+                    small = cv2.resize(frame, (target_w, target_h))
+                    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                    frames_list.append(gray)
+                idx += 1
+        finally:
+            cap.release()
+
+        return np.array(frames_list, dtype=np.uint8) if frames_list else np.zeros((0, target_h, target_w), dtype=np.uint8)
 
     def _select_diverse_poses(
         self,
@@ -567,47 +749,29 @@ class OllamaVisionScorer:
         desired_count: int,
     ) -> List[PoseCandidateWindow]:
         """
-        Ordonne les poses candidates selon un algorithme glouton (Maximal Marginal Relevance)
-        qui combine la note de contraction (`score`) et la différence visuelle (`1 - cos_sim`)
-        par rapport à la pose précédente.
-        Ainsi, comme dans `exemple.mp4`, deux plans consécutifs montrent toujours deux
-        poses visuellement très différentes (ex: Pose de face -> Pose de profil -> Pose de dos).
+        Sélectionne les poses candidates selon l'algorithme Maximal Marginal Relevance (MMR)
+        pour garantir que chaque plan consécutif présente une pose visuellement très différente
+        (ex: Most Muscular -> Side Chest -> Front Double Biceps -> Lat Spread).
         """
         if len(candidates) <= 1:
             return candidates
 
-        remaining = sorted(candidates, key=lambda c: c.score, reverse=True)
-        # On démarre par une pose à fort impact visuel (ex: Most Muscular / Double Biceps)
-        chosen: List[PoseCandidateWindow] = [remaining.pop(0)]
+        pool = list(candidates)
+        pool.sort(key=lambda c: c.score, reverse=True)
+        chosen: List[PoseCandidateWindow] = [pool.pop(0)]
 
-        pose_names = [
-            "Most Muscular (Crab / Front)",
-            "Side Chest & Biceps",
-            "Front Lat Spread / Aesthetic",
-            "Front Double Biceps",
-            "Back Double Biceps / Triceps",
-            "Classic Arnold Pose",
-            "Abdominals & Obliques Flex",
-            "Side Triceps Lock",
-        ]
-        chosen[0].pose_label = pose_names[0]
+        while pool and len(chosen) < desired_count:
+            last_desc = chosen[-1].descriptor
 
-        while remaining and len(chosen) < desired_count:
-            prev_pose = chosen[-1]
-
-            def diversity_objective(cand: PoseCandidateWindow) -> float:
-                # Similarité cosinus entre les silhouettes 16x16
-                cos_sim = float(np.dot(cand.descriptor, prev_pose.descriptor))
+            def mmr_score(cand: PoseCandidateWindow) -> float:
+                cos_sim = float(np.dot(cand.descriptor, last_desc))
                 visual_diff = 1.0 - max(-1.0, min(1.0, cos_sim))
-                # Écart temporel pour éviter de prendre deux extraits trop proches dans le rush
-                time_diff_bonus = (
-                    0.25 if abs(cand.center_time - prev_pose.center_time) >= 12.0 else 0.0
-                )
-                return 0.55 * cand.score + 0.45 * visual_diff + time_diff_bonus
+                # Écart temporel pour éviter de répéter deux prises de la même pose
+                time_sep = min(30.0, abs(cand.center_time - chosen[-1].center_time)) / 30.0
+                return 0.50 * cand.score + 22.0 * visual_diff + 6.0 * time_sep
 
-            best_next = max(remaining, key=diversity_objective)
-            remaining.remove(best_next)
-            best_next.pose_label = pose_names[len(chosen) % len(pose_names)]
+            best_next = max(pool, key=mmr_score)
+            pool.remove(best_next)
             chosen.append(best_next)
 
         return chosen

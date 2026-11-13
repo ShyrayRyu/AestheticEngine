@@ -977,24 +977,70 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
           <div
             v-for="(seg, idx) in projectStatus.selected_segments"
             :key="idx"
-            class="rounded-lg border border-zinc-800/90 bg-zinc-900/60 p-2.5 text-xs"
+            class="group relative flex flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/80 p-3 transition hover:border-zinc-700"
           >
-            <div class="flex items-center justify-between font-bold text-red-300">
-              <span>Plan #{{ idx + 1 }} : {{ seg.pose_label }}</span>
+            <!-- Vignette du pic de contraction -->
+            <div
+              v-if="seg.thumbnail_url"
+              class="relative mb-2 aspect-[9/16] max-h-52 w-full overflow-hidden rounded-lg bg-black/90 flex items-center justify-center border border-zinc-800/80"
+            >
+              <img
+                :src="`${API_BASE_URL}${seg.thumbnail_url}`"
+                :alt="seg.pose_label"
+                class="h-full w-full object-contain transition duration-300 group-hover:scale-105"
+                loading="lazy"
+              />
+              <span
+                class="absolute left-2 top-2 rounded bg-black/75 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white backdrop-blur-sm"
+              >
+                #{{ idx + 1 }}
+              </span>
+              <span
+                v-if="seg.hold_duration"
+                class="absolute bottom-2 left-2 rounded bg-red-950/80 border border-red-500/40 px-1.5 py-0.5 text-[10px] font-bold text-red-300 backdrop-blur-sm"
+              >
+                Maintien : {{ seg.hold_duration.toFixed(1) }}s
+              </span>
+              <span
+                class="absolute bottom-2 right-2 rounded bg-black/75 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 backdrop-blur-sm"
+              >
+                @{{ seg.peak_time_in_source.toFixed(1) }}s
+              </span>
+            </div>
+
+            <!-- Détails de la coupe et de la pose -->
+            <div class="flex items-center justify-between font-bold text-zinc-200">
+              <span class="truncate text-xs font-semibold text-red-400">
+                {{ seg.pose_label }}
+              </span>
               <span class="font-mono text-[11px] text-zinc-400">
+                {{ (seg.timeline_end - seg.timeline_start).toFixed(1) }}s
+              </span>
+            </div>
+
+            <div class="mt-1 flex items-center justify-between text-[11px] font-mono text-zinc-400">
+              <span>Timeline</span>
+              <span class="text-zinc-300">
                 {{ seg.timeline_start.toFixed(1) }}s → {{ seg.timeline_end.toFixed(1) }}s
               </span>
             </div>
-            <p class="mt-1 font-mono text-[11px] text-zinc-400">
-              Rush source : {{ seg.start_time.toFixed(1) }}s – {{ seg.end_time.toFixed(1) }}s
-              <span v-if="seg.rotation_correction" class="text-emerald-400">
-                (Redressé {{ seg.rotation_correction }}°)
+
+            <div class="mt-0.5 flex items-center justify-between text-[11px] font-mono text-zinc-500">
+              <span>Source</span>
+              <span class="text-zinc-400">
+                {{ seg.start_time.toFixed(1) }}s – {{ seg.end_time.toFixed(1) }}s
               </span>
-            </p>
+            </div>
+
+            <div v-if="seg.rotation_correction" class="mt-1.5 flex justify-end">
+              <span class="rounded bg-emerald-950/70 border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-400">
+                Redressé {{ seg.rotation_correction }}°
+              </span>
+            </div>
           </div>
         </div>
       </div>
