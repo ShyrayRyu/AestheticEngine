@@ -109,7 +109,7 @@ class OllamaVisionScorer:
             cands, intro = await asyncio.to_thread(
                 self._scan_video_pose_windows,
                 video_path,
-                max(8, target_segment_count + 4),
+                max(16, target_segment_count * 2),
             )
             all_candidates.extend(cands)
             if intro_candidate is None and intro is not None:
@@ -414,6 +414,22 @@ class OllamaVisionScorer:
         x1, x2 = int(w_small * 0.10), int(w_small * 0.90)
         upper_body = frames_array[:, y1:y2, x1:x2]
 
+        # 3bis. Détection stricte de présence humaine dans le rectangle central du corps
+        # En l'absence de l'athlète (ex: porte, casiers ou pièce vides), le rectangle central
+        # est lisse et sans détails vivants : smooth_cgrad < 14.0 et smooth_cstd < 30.0.
+        # Quand un athlète est présent (pectoraux, dorsaux, débardeur, veines, tête),
+        # smooth_cgrad s'élève entre 17.5 et 26.5.
+        cy1, cy2 = int(h_small * 0.22), int(h_small * 0.65)
+        cx1, cx2 = int(w_small * 0.25), int(w_small * 0.75)
+        center_body = frames_array[:, cy1:cy2, cx1:cx2]
+        cgx = np.abs(center_body[:, :, 1:].astype(np.float32) - center_body[:, :, :-1].astype(np.float32))
+        cgy = np.abs(center_body[:, 1:, :].astype(np.float32) - center_body[:, :-1, :].astype(np.float32))
+        center_grad = cgx[:, :-1, :].mean(axis=(1, 2)) + cgy[:, :, :-1].mean(axis=(1, 2))
+        smooth_cgrad = np.convolve(center_grad, kernel, mode="same")
+        center_std = np.std(center_body, axis=(1, 2))
+        smooth_cstd = np.convolve(center_std, kernel, mode="same")
+        has_human_frame = (smooth_cgrad >= 14.5) & (smooth_cstd >= 30.0)
+
         # 4. Gradient musculaire et striations (Sobel) sur le haut du corps
         gx = np.abs(upper_body[:, :, 1:].astype(np.float32) - upper_body[:, :, :-1].astype(np.float32))
         gy = np.abs(upper_body[:, 1:, :].astype(np.float32) - upper_body[:, :-1, :].astype(np.float32))
@@ -431,13 +447,15 @@ class OllamaVisionScorer:
         skin_density = np.mean((upper_body >= 55) & (upper_body <= 220), axis=(1, 2))
         smooth_skin = np.convolve(skin_density, kernel, mode="same")
 
-        # 7. Seuil de mouvement adaptatif : un plateau isométrique est stable
-        p35 = float(np.percentile(smooth_mot, 35))
-        mot_thresh = max(2.2, min(4.5, p35 * 1.35))
+        # 7. Seuil de mouvement adaptatif : permet les contractions isométriques intenses
+        # Lors d'une contraction maximale (Most Muscular, Crab Flex), les muscles tremblent
+        # légèrement et la respiration s'intensifie (motion entre 3.0 et 6.5).
+        p50 = float(np.percentile(smooth_mot, 50))
+        mot_thresh = max(3.0, min(6.8, p50 * 1.35))
 
         # Fenêtre de sécurité : ignore le réglage de la caméra / téléphone au tout début
-        start_guard = 6.0 if duration > 25.0 else (3.0 if duration > 14.0 else 0.5)
-        end_guard = max(start_guard + 2.0, duration - 3.0)
+        start_guard = 4.0 if duration > 20.0 else 1.0
+        end_guard = max(start_guard + 2.0, duration - 2.5)
 
         raw_holds: List[dict] = []
         in_hold = False
@@ -450,7 +468,8 @@ class OllamaVisionScorer:
                     in_hold = False
                 continue
 
-            is_still = bool(smooth_mot[i] < mot_thresh)
+            # Maintien isométrique valide UNIQUEMENT si l'athlète est réellement présent dans le cadre
+            is_still = bool(smooth_mot[i] < mot_thresh and has_human_frame[i])
             if is_still:
                 if not in_hold:
                     in_hold = True
@@ -460,46 +479,50 @@ class OllamaVisionScorer:
                     in_hold = False
                     hold_len = (i - s_idx) / fps_s
                     if 1.4 <= hold_len <= 7.0:
-                        raw_holds.append(
-                            self._build_hold_record(
-                                frames_array=frames_array,
-                                smooth_mot=smooth_mot,
-                                smooth_grad=smooth_grad,
-                                smooth_expansion=smooth_expansion,
-                                smooth_skin=smooth_skin,
-                                s_idx=s_idx,
-                                e_idx=i,
-                                fps_s=fps_s,
-                                w_small=w_small,
-                            )
+                        rec = self._build_hold_record(
+                            frames_array=frames_array,
+                            smooth_mot=smooth_mot,
+                            smooth_grad=smooth_grad,
+                            smooth_expansion=smooth_expansion,
+                            smooth_skin=smooth_skin,
+                            smooth_cgrad=smooth_cgrad,
+                            smooth_cstd=smooth_cstd,
+                            s_idx=s_idx,
+                            e_idx=i,
+                            fps_s=fps_s,
+                            w_small=w_small,
                         )
+                        if rec is not None:
+                            raw_holds.append(rec)
 
         if in_hold and 1.4 <= (len(smooth_mot) - s_idx) / fps_s <= 7.0:
-            raw_holds.append(
-                self._build_hold_record(
-                    frames_array=frames_array,
-                    smooth_mot=smooth_mot,
-                    smooth_grad=smooth_grad,
-                    smooth_expansion=smooth_expansion,
-                    smooth_skin=smooth_skin,
-                    s_idx=s_idx,
-                    e_idx=len(smooth_mot),
-                    fps_s=fps_s,
-                    w_small=w_small,
-                )
+            rec = self._build_hold_record(
+                frames_array=frames_array,
+                smooth_mot=smooth_mot,
+                smooth_grad=smooth_grad,
+                smooth_expansion=smooth_expansion,
+                smooth_skin=smooth_skin,
+                smooth_cgrad=smooth_cgrad,
+                smooth_cstd=smooth_cstd,
+                s_idx=s_idx,
+                e_idx=len(smooth_mot),
+                fps_s=fps_s,
+                w_small=w_small,
             )
+            if rec is not None:
+                raw_holds.append(rec)
 
-        # Si aucun hold strict n'a été trouvé, on élargit le seuil
+        # Si aucun hold strict n'a été trouvé, on élargit le seuil avec présence humaine obligatoire
         if not raw_holds:
             logger.warning("Aucun plateau isométrique strict détecté — recherche assouplie...")
-            mot_thresh_relaxed = max(3.8, float(np.median(smooth_mot)))
+            mot_thresh_relaxed = max(4.0, float(np.median(smooth_mot)) * 1.25)
             in_hold = False
             s_idx = 0
             for i in range(len(smooth_mot)):
                 t = i / fps_s
                 if t < 1.0 or t > duration - 1.0:
                     continue
-                if smooth_mot[i] < mot_thresh_relaxed:
+                if smooth_mot[i] < mot_thresh_relaxed and has_human_frame[i]:
                     if not in_hold:
                         in_hold = True
                         s_idx = i
@@ -508,33 +531,43 @@ class OllamaVisionScorer:
                         in_hold = False
                         hold_len = (i - s_idx) / fps_s
                         if 1.2 <= hold_len <= 7.0:
-                            raw_holds.append(
-                                self._build_hold_record(
-                                    frames_array=frames_array,
-                                    smooth_mot=smooth_mot,
-                                    smooth_grad=smooth_grad,
-                                    smooth_expansion=smooth_expansion,
-                                    smooth_skin=smooth_skin,
-                                    s_idx=s_idx,
-                                    e_idx=i,
-                                    fps_s=fps_s,
-                                    w_small=w_small,
-                                )
+                            rec = self._build_hold_record(
+                                frames_array=frames_array,
+                                smooth_mot=smooth_mot,
+                                smooth_grad=smooth_grad,
+                                smooth_expansion=smooth_expansion,
+                                smooth_skin=smooth_skin,
+                                smooth_cgrad=smooth_cgrad,
+                                smooth_cstd=smooth_cstd,
+                                s_idx=s_idx,
+                                e_idx=i,
+                                fps_s=fps_s,
+                                w_small=w_small,
                             )
+                            if rec is not None:
+                                raw_holds.append(rec)
 
-        # 8. Détection intelligente du plan d'Intro (la mise en place sous le spot)
-        intro_cand: Optional[PoseCandidateWindow] = None
-        if raw_holds and duration >= 14.0:
-            first_hold_start = min(h["start"] for h in raw_holds)
-            if first_hold_start >= 4.0:
-                intro_end = round(max(2.0, first_hold_start - 0.35), 3)
-                intro_start = round(max(0.5, intro_end - 2.5), 3)
-            else:
-                intro_start = 0.5
-                intro_end = min(duration - 1.0, 2.8)
-        else:
-            intro_start = 0.5
-            intro_end = min(duration - 1.0, 2.8)
+        # 8. Détection intelligente du plan d'Intro (la mise en place de l'athlète sous le spot)
+        # On recherche la première fenêtre où l'athlète est réellement dans le cadre (has_human_frame)
+        intro_dur = 2.4
+        intro_found = False
+        intro_start = 0.5
+        intro_end = min(duration - 1.0, 2.9)
+
+        for t_probe in np.arange(1.0, min(duration - intro_dur, 25.0), 0.5):
+            s_probe = int(t_probe * fps_s)
+            e_probe = int((t_probe + intro_dur) * fps_s)
+            if s_probe < len(has_human_frame) and e_probe <= len(has_human_frame):
+                if np.all(has_human_frame[s_probe:e_probe]):
+                    intro_start = round(t_probe, 3)
+                    intro_end = round(t_probe + intro_dur, 3)
+                    intro_found = True
+                    break
+
+        if not intro_found and raw_holds:
+            # Repli sécurisé juste avant le premier hold validé
+            intro_start = max(0.5, raw_holds[0]["start"] - 2.8)
+            intro_end = raw_holds[0]["start"] - 0.4
 
         intro_cand = PoseCandidateWindow(
             video_path=video_path,
@@ -600,12 +633,21 @@ class OllamaVisionScorer:
         smooth_grad: np.ndarray,
         smooth_expansion: np.ndarray,
         smooth_skin: np.ndarray,
+        smooth_cgrad: np.ndarray,
+        smooth_cstd: np.ndarray,
         s_idx: int,
         e_idx: int,
         fps_s: float,
         w_small: int,
-    ) -> dict:
+    ) -> Optional[dict]:
         """Construit l'analyse détaillée et le score esthétique d'un plateau isométrique."""
+        # 1. Vérification formelle de la présence humaine sur l'ensemble du maintien
+        avg_cg = float(np.mean(smooth_cgrad[s_idx:e_idx]))
+        avg_cs = float(np.mean(smooth_cstd[s_idx:e_idx]))
+        if avg_cg < 14.5 or avg_cs < 30.0:
+            # Rejette formellement toute pièce ou porte vide
+            return None
+
         h_start = round(s_idx / fps_s, 3)
         h_end = round(e_idx / fps_s, 3)
         h_len = round(h_end - h_start, 3)
@@ -625,31 +667,36 @@ class OllamaVisionScorer:
 
         # Composantes du score esthétique musculation :
         # 1. Définition et striations musculaires (Sobel)
-        grad_pts = (avg_g / 22.0) * 35.0
+        grad_pts = (avg_g / 20.0) * 30.0
 
         # 2. Déploiement des bras & V-taper (coudes/dorsaux écartés)
-        expansion_pts = (min(55.0, avg_exp) / 55.0) * 30.0
+        expansion_pts = (min(55.0, avg_exp) / 55.0) * 25.0
 
-        # 3. Présence musculaire / peau exposée sous le spot
-        skin_pts = float(np.clip(avg_skin * 25.0, 0.0, 20.0))
+        # 3. Présence musculaire / peau exposée sous le spot (pondération quadratique)
+        skin_pts = (avg_skin ** 2) * 25.0
 
-        # 4. Durée idéale de tenue (une vraie pose dure 1.8s à 4.2s)
-        if 1.8 <= h_len <= 4.2:
+        # 4. Durée idéale de tenue (une vraie pose dure 1.8s à 4.5s)
+        if 1.8 <= h_len <= 4.5:
             dur_pts = 15.0
         elif h_len < 1.8:
             dur_pts = 8.0
         else:
-            # Pénalité pour les temps morts / repos prolongés (> 4.2s)
-            dur_pts = max(0.0, 15.0 - (h_len - 4.2) * 5.0)
+            # Pénalité pour les temps morts / repos prolongés (> 4.5s)
+            dur_pts = max(0.0, 15.0 - (h_len - 4.5) * 4.0)
 
-        # 5. Pénalité sévère si posture de repos (bras ballants le long du corps)
-        resting_penalty = 30.0 if avg_exp < 24.0 else 0.0
-        mot_penalty = float(avg_m * 2.5)
+        # 5. Bonus esthétique majeur pour les poses torse nu / peau découverte
+        shirtless_bonus = 20.0 if avg_skin >= 0.72 else (10.0 if avg_skin >= 0.65 else 0.0)
 
-        raw_score = float(grad_pts + expansion_pts + skin_pts + dur_pts - resting_penalty - mot_penalty)
+        # 6. Pénalité sévère si posture de repos (bras ballants le long du corps)
+        resting_penalty = 30.0 if avg_exp < 28.0 else 0.0
+        mot_penalty = float(avg_m * 1.8)
+
+        raw_score = float(
+            grad_pts + expansion_pts + skin_pts + dur_pts + shirtless_bonus - resting_penalty - mot_penalty
+        )
 
         # Normalisation sur l'échelle standard 7.0 - 9.9
-        normalized_score = float(np.clip(7.0 + (raw_score - 30.0) * (2.9 / 60.0), 7.0, 9.9))
+        normalized_score = float(np.clip(7.0 + (raw_score - 40.0) * (2.9 / 55.0), 7.0, 9.9))
 
         label = self._classify_pose_silhouette(
             expansion_val=avg_exp,
@@ -679,17 +726,17 @@ class OllamaVisionScorer:
         skin_val: float,
     ) -> str:
         """Détermine le type de pose musculation selon le gabarit biomécanique et le relief."""
-        if expansion_val >= 40.0:
-            if grad_val >= 18.0:
+        if expansion_val >= 107.5:
+            if grad_val >= 16.0:
                 return "Back Double Biceps / Overhead Flex"
             return "Front Lat Spread (V-Taper)"
-        if expansion_val >= 32.0:
-            if skin_val >= 0.50:
+        if expansion_val >= 102.5:
+            if skin_val >= 0.76:
                 return "Most Muscular (Crab / Flex)"
             return "Front Double Biceps"
-        if skin_val >= 0.45 and expansion_val <= 30.0:
-            return "Side Chest & Triceps Lock"
-        if grad_val >= 16.0:
+        if expansion_val < 102.5:
+            if skin_val >= 0.75:
+                return "Side Chest & Triceps Lock"
             return "Abdominals & Serratus Flex"
         return "Classic Aesthetic Flex"
 
@@ -773,7 +820,8 @@ class OllamaVisionScorer:
         """
         Sélectionne les poses candidates selon l'algorithme Maximal Marginal Relevance (MMR)
         pour garantir que chaque plan consécutif présente une pose visuellement très différente
-        (ex: Most Muscular -> Side Chest -> Front Double Biceps -> Lat Spread).
+        (ex: Most Muscular -> Side Chest -> Front Double Biceps -> Lat Spread) tout en privilégiant
+        la qualité esthétique maximale sans pénaliser artificiellement les meilleures poses de la vidéo.
         """
         if len(candidates) <= 1:
             return candidates
@@ -786,13 +834,29 @@ class OllamaVisionScorer:
             last_desc = chosen[-1].descriptor
 
             def mmr_score(cand: PoseCandidateWindow) -> float:
-                cos_sim = float(np.dot(cand.descriptor, last_desc))
-                visual_diff = 1.0 - max(-1.0, min(1.0, cos_sim))
-                # Écart temporel pour éviter de répéter deux prises de la même pose
-                time_sep = min(30.0, abs(cand.center_time - chosen[-1].center_time)) / 30.0
-                return 0.50 * cand.score + 22.0 * visual_diff + 6.0 * time_sep
+                # Différence visuelle par rapport à la pose précédente
+                cos_sim_last = float(np.dot(cand.descriptor, last_desc))
+                visual_diff = float(np.clip(1.0 - cos_sim_last, 0.0, 1.0))
 
-            best_next = max(pool, key=mmr_score)
+                # Distance temporelle minimale par rapport à l'ensemble des poses déjà sélectionnées
+                min_time_dist = min(abs(cand.center_time - c.center_time) for c in chosen)
+                if min_time_dist < 3.2:
+                    # Évite les doublons quasi-immédiats de la même contraction
+                    return -999.0
+
+                time_factor = min(1.0, min_time_dist / 14.0)
+
+                # La note de qualité esthétique (cand.score) domine le classement (~75%)
+                # La différence visuelle apporte une saine variété de poses (~20%)
+                # L'espacement temporel apporte un léger bonus d'aération (~5%)
+                return (cand.score * 8.5) + (visual_diff * 12.0) + (time_factor * 3.5)
+
+            valid_candidates = [c for c in pool if mmr_score(c) > -900.0]
+            if not valid_candidates:
+                best_next = max(pool, key=lambda c: c.score)
+            else:
+                best_next = max(valid_candidates, key=mmr_score)
+
             pool.remove(best_next)
             chosen.append(best_next)
 
