@@ -34,17 +34,19 @@ from app.models.schemas import FrameEffortScore, SelectedVideoSegment
 
 logger = logging.getLogger(__name__)
 
-LLAVA_POSING_PROMPT = """Tu es un juge de bodybuilding et monteur TikTok "Aesthetic Posing".
+LLAVA_POSING_PROMPT = """Tu es un juge d'élite de bodybuilding et monteur TikTok "Dark Aesthetic Posing".
 Analyse cette image extraite d'une séance de posing musculation.
-Évalue la qualité esthétique de la pose et de la contraction musculaire (définition, symétrie, éclairage zénithal, charisme).
-Vérifie également si l'athlète est dans le bon sens (debout, tête en haut -> rotation_needed: 0) ou si l'image doit être tournée dans le sens horaire de 90, 180 ou 270 degrés pour être à l'endroit.
+Évalue la qualité esthétique et l'intensité de la contraction musculaire :
+- Définition musculaire et striations (pectoraux, deltoïdes, dorsaux, bras, abdominaux, vascularité).
+- Symétrie, posture de posing (Double Biceps, Most Muscular, Lat Spread, Side Chest/Triceps).
+- Éclairage dramatique, V-Taper et présence charismatique sous la lumière.
+Pénalise sévèrement les moments où l'athlète se repose, a les bras ballants le long du corps, ou ajuste ses vêtements.
 Réponds UNIQUEMENT avec un objet JSON valide :
 {
-  "effort_score": 8.8,
-  "exercise_detected": "Most Muscular / Side Chest / Front Double Biceps / Back Pose",
+  "effort_score": 9.2,
+  "exercise_detected": "Back Double Biceps / Most Muscular / Side Chest / Front Lat Spread",
   "is_peak_contraction": true,
-  "rotation_needed": 0,
-  "reasoning": "Pose verrouillée avec excellente définition sous éclairage dramatique"
+  "reasoning": "Contraction maximale des dorsaux et deltoïdes avec V-taper prononcé sous éclairage zénithal"
 }
 """
 
@@ -272,10 +274,13 @@ class OllamaVisionScorer:
         video_path: Path,
     ) -> Tuple[int, Literal["9:16", "16:9"]]:
         """
-        Reconnaît automatiquement si un rush vidéo est dans le bon sens (athlète debout tête en haut)
-        ou s'il est tourné sur le côté (90° / 270°) ou à l'envers (180°), et détermine :
-          1. `rotation_correction` : 0, 90, 180 ou 270 degrés horaires pour remettre l'athlète debout.
-          2. `upright_aspect_ratio` : '9:16' ou '16:9' une fois le rush remis dans le bon sens.
+        Reconnaît avec précision l'orientation réelle d'un rush vidéo :
+          - Si le flux est déjà décodé en portrait vertical (h >= w, ex: 1080x1920 ou 720x1280),
+            l'orientation est STRICTEMENT 0° (9:16). Toute rotation de 90°/270° coucherait
+            inutilement l'athlète sur le flanc.
+          - Si le flux est décodé en paysage horizontal (w > h), on vérifie si la vidéo a été
+            filmée verticalement (téléphone orienté en mode portrait mais fichier encodé en paysage)
+            en évaluant si une rotation de 90° ou 270° redresse une silhouette humaine debout.
         """
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -288,7 +293,7 @@ class OllamaVisionScorer:
         sample_times = np.linspace(
             max(0.2, duration * 0.12),
             max(0.5, duration * 0.88),
-            num=min(8, max(3, int(duration))),
+            num=min(6, max(3, int(duration))),
         )
         sampled_frames: List[np.ndarray] = []
         try:
@@ -303,19 +308,28 @@ class OllamaVisionScorer:
         if not sampled_frames:
             return 0, "9:16"
 
+        raw_h, raw_w = sampled_frames[0].shape[:2]
+
+        # 1. RÈGLE MAJEURE : Si le flux est déjà vertical (hauteur >= largeur)
+        # OpenCV et FFmpeg intègrent déjà automatiquement les métadonnées de rotation (displaymatrix).
+        # Un rush vertical 9:16 est donc DÉJÀ dans le bon sens !
+        if raw_h >= raw_w:
+            logger.info(
+                "Rush '%s' : format natif vertical portrait (%dx%d) -> rotation_correction=0° (9:16 garanti)",
+                video_path.name,
+                raw_w,
+                raw_h,
+            )
+            return 0, "9:16"
+
+        # 2. Cas d'un rush horizontal (raw_w > raw_h, ex: 1920x1080)
+        # On vérifie si l'athlète a filmé à la verticale sans balise de rotation
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
-        upper_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_upperbody.xml"
-        )
-        hog = cv2.HOGDescriptor()
-        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        scores: Dict[int, float] = {0: 1.0, 90: 0.0, 270: 0.0}
 
-        scores: Dict[int, float] = {0: 0.25, 90: 0.0, 180: 0.0, 270: 0.0}
-
-        for cand_angle in (0, 90, 180, 270):
-            grays: List[np.ndarray] = []
+        for cand_angle in (0, 90, 270):
             for raw_f in sampled_frames:
                 rot_f = self._rotate_frame_cw(raw_f, cand_angle)
                 rh, rw = rot_f.shape[:2]
@@ -325,62 +339,26 @@ class OllamaVisionScorer:
                     (max(32, int(rw * scale)), max(32, int(rh * scale))),
                 )
                 gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                grays.append(gray)
                 sh, sw = gray.shape[:2]
 
-                # 1. Détection de visage dans la moitié supérieure de l'image
                 if not face_cascade.empty():
-                    faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(18, 18))
+                    faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(20, 20))
                     for fx, fy, fw, fh in faces:
                         cy = (fy + fh * 0.5) / float(sh)
                         cx = (fx + fw * 0.5) / float(sw)
-                        if 0.04 <= cy <= 0.52 and 0.15 <= cx <= 0.85:
-                            scores[cand_angle] += 3.5
+                        if 0.05 <= cy <= 0.48 and 0.18 <= cx <= 0.82:
+                            scores[cand_angle] += 4.0
 
-                # 2. Détection du haut du corps (épaules / buste)
-                if not upper_cascade.empty():
-                    uppers = upper_cascade.detectMultiScale(gray, 1.1, 3, minSize=(32, 32))
-                    for ux, uy, uw, uh in uppers:
-                        cy = (uy + uh * 0.5) / float(sh)
-                        cx = (ux + uw * 0.5) / float(sw)
-                        if 0.08 <= cy <= 0.68 and 0.15 <= cx <= 0.85:
-                            scores[cand_angle] += 2.0
+        best_angle = 0
+        if scores[90] > scores[0] * 2.0 and scores[90] > scores[270] + 2.0:
+            best_angle = 90
+        elif scores[270] > scores[0] * 2.0 and scores[270] > scores[90] + 2.0:
+            best_angle = 270
 
-                # 3. Détecteur de silhouette humaine debout (HOG)
-                _, weights = hog.detectMultiScale(
-                    gray, winStride=(8, 8), padding=(8, 8), scale=1.05
-                )
-                for w_val in weights:
-                    scores[cand_angle] += float(w_val) * 1.5
-
-            # 4. Analyse de la colonne vertébrale de mouvement & éclairage zénithal
-            if len(grays) >= 2:
-                diffs = [cv2.absdiff(grays[i], grays[i - 1]) for i in range(1, len(grays))]
-                mean_mot = np.mean(diffs, axis=0)
-                sh, sw = mean_mot.shape[:2]
-
-                col_energy = np.mean(mean_mot, axis=0)
-                row_energy = np.mean(mean_mot, axis=1)
-                col_conc = float(np.std(col_energy) / (np.mean(col_energy) + 1e-5))
-                row_conc = float(np.std(row_energy) / (np.mean(row_energy) + 1e-5))
-                if col_conc > row_conc:
-                    scores[cand_angle] += 1.5
-
-                top_mot = float(np.mean(mean_mot[int(sh * 0.12) : int(sh * 0.55), :]))
-                bot_mot = float(np.mean(mean_mot[int(sh * 0.55) : int(sh * 0.92), :]))
-                if top_mot > bot_mot * 1.05:
-                    scores[cand_angle] += 1.2
-
-        best_angle = max(scores, key=lambda k: scores[k])
-        if best_angle != 0 and scores[best_angle] < scores[0] + 1.2:
-            best_angle = 0
-
-        upright_sample = self._rotate_frame_cw(sampled_frames[0], best_angle)
-        uh, uw = upright_sample.shape[:2]
-        upright_aspect: Literal["9:16", "16:9"] = "9:16" if uh >= uw else "16:9"
+        upright_aspect: Literal["9:16", "16:9"] = "9:16" if best_angle in (90, 270) else "16:9"
 
         logger.info(
-            "Orientation IA '%s' : rotation_correction=%d° | format_redressé=%s | scores=%s",
+            "Orientation rush paysage '%s' : rotation_correction=%d° | aspect=%s | scores=%s",
             video_path.name,
             best_angle,
             upright_aspect,
@@ -395,17 +373,17 @@ class OllamaVisionScorer:
     ) -> Tuple[List[PoseCandidateWindow], Optional[PoseCandidateWindow]]:
         """
         Analyse approfondie du rush vidéo pour détecter les véritables contractions musculaires :
-          1. Détecte et applique l'orientation réelle (remet l'athlète debout à l'endroit).
-          2. Extrait à haute vitesse (FFmpeg rawvideo pipe à 4 Hz) les flux de mouvement et de contour.
+          1. Détecte et garantit l'orientation exacte (0° pour 9:16 natif).
+          2. Extrait à haute vitesse (FFmpeg rawvideo pipe) les flux de mouvement et de contour.
           3. Détecte les vrais plateaux isométriques ("Pose Locks") : les moments où l'athlète maintient
-             une contraction ferme (> 1.6s) après être entré dans la pose, avec forte netteté musculaire
-             et déploiement de la silhouette (bras levés, dos déployé, abdos contractés).
-          4. Isole automatiquement le plan d'intro réel (la mise en place sous le spot juste avant la 1re pose,
-             en éliminant tout réglage de caméra / écran au début).
+             une contraction ferme (1.6s à 4.5s) avec forte netteté musculaire et déploiement de la silhouette
+             (bras levés, dos déployé, abdos contractés, deltoïdes sous éclairage zénithal).
+          4. Élimine formellement les temps morts de repos (bras ballants le long du corps).
+          5. Isole automatiquement le plan d'intro (mise en place sous le spot juste avant la 1re pose).
         """
         rot_corr, upright_aspect = self._detect_video_orientation_and_framing(video_path)
 
-        # 1. Décodage ultra-rapide des frames basse résolution (90x160) à 2 Hz via FFmpeg
+        # 1. Décodage ultra-rapide des frames basse résolution (90x160) via FFmpeg
         w_small, h_small = 90, 160
         fps_s = 2.0
         frames_array = self._extract_fast_grayscale_frames(
@@ -430,26 +408,36 @@ class OllamaVisionScorer:
         kernel = np.ones(3, dtype=np.float32) / 3.0
         smooth_mot = np.convolve(diffs, kernel, mode="same")
 
-        # 3. Gradient musculaire (Sobel) sur la région du buste et des bras (y: 20%..80%, x: 10%..90%)
-        torso = frames_array[:, int(h_small * 0.20) : int(h_small * 0.80), int(w_small * 0.10) : int(w_small * 0.90)]
-        gx = np.abs(torso[:, :, 1:].astype(np.float32) - torso[:, :, :-1].astype(np.float32))
-        gy = np.abs(torso[:, 1:, :].astype(np.float32) - torso[:, :-1, :].astype(np.float32))
+        # 3. Zone corporelle supérieure (deltoïdes, trapèzes, pectoraux, dorsaux, bras)
+        # y: 18%..55% de la hauteur, x: 10%..90% de la largeur
+        y1, y2 = int(h_small * 0.18), int(h_small * 0.55)
+        x1, x2 = int(w_small * 0.10), int(w_small * 0.90)
+        upper_body = frames_array[:, y1:y2, x1:x2]
+
+        # 4. Gradient musculaire et striations (Sobel) sur le haut du corps
+        gx = np.abs(upper_body[:, :, 1:].astype(np.float32) - upper_body[:, :, :-1].astype(np.float32))
+        gy = np.abs(upper_body[:, 1:, :].astype(np.float32) - upper_body[:, :-1, :].astype(np.float32))
         grad_energy = gx[:, :-1, :].mean(axis=(1, 2)) + gy[:, :, :-1].mean(axis=(1, 2))
         smooth_grad = np.convolve(grad_energy, kernel, mode="same")
 
-        # 4. Envergure de la silhouette (largeur du corps lors des poses: lat spread, double biceps...)
-        bg_est = np.median(frames_array[::max(1, int(fps_s * 2))], axis=0)
-        fg_mask = np.abs(frames_array.astype(np.float32) - bg_est[np.newaxis, :, :]) > 18.0
-        upper_fg = fg_mask[:, int(h_small * 0.18) : int(h_small * 0.72), :]
-        body_width = np.sum(np.any(upper_fg, axis=1), axis=1)
+        # 5. Déploiement des bras et V-Taper (activité latérale externe des coudes et dorsaux)
+        flank_w = int(upper_body.shape[2] * 0.28)
+        left_flank = upper_body[:, :, :flank_w]
+        right_flank = upper_body[:, :, -flank_w:]
+        outer_expansion = np.std(left_flank, axis=(1, 2)) + np.std(right_flank, axis=(1, 2))
+        smooth_expansion = np.convolve(outer_expansion, kernel, mode="same")
 
-        # 5. Seuil de mouvement adaptatif : un plateau isométrique a un mouvement sous le 35e centile
+        # 6. Densité musculaire / peau sous spot zénithal (55 à 220)
+        skin_density = np.mean((upper_body >= 55) & (upper_body <= 220), axis=(1, 2))
+        smooth_skin = np.convolve(skin_density, kernel, mode="same")
+
+        # 7. Seuil de mouvement adaptatif : un plateau isométrique est stable
         p35 = float(np.percentile(smooth_mot, 35))
-        mot_thresh = max(2.5, min(4.9, p35 * 1.30))
+        mot_thresh = max(2.2, min(4.5, p35 * 1.35))
 
         # Fenêtre de sécurité : ignore le réglage de la caméra / téléphone au tout début
-        start_guard = 12.0 if duration > 25.0 else (5.0 if duration > 14.0 else 0.5)
-        end_guard = max(start_guard + 2.0, duration - 3.5)
+        start_guard = 6.0 if duration > 25.0 else (3.0 if duration > 14.0 else 0.5)
+        end_guard = max(start_guard + 2.0, duration - 3.0)
 
         raw_holds: List[dict] = []
         in_hold = False
@@ -471,13 +459,14 @@ class OllamaVisionScorer:
                 if in_hold:
                     in_hold = False
                     hold_len = (i - s_idx) / fps_s
-                    if hold_len >= 1.6:
+                    if 1.4 <= hold_len <= 7.0:
                         raw_holds.append(
                             self._build_hold_record(
                                 frames_array=frames_array,
                                 smooth_mot=smooth_mot,
                                 smooth_grad=smooth_grad,
-                                body_width=body_width,
+                                smooth_expansion=smooth_expansion,
+                                smooth_skin=smooth_skin,
                                 s_idx=s_idx,
                                 e_idx=i,
                                 fps_s=fps_s,
@@ -485,13 +474,14 @@ class OllamaVisionScorer:
                             )
                         )
 
-        if in_hold and (len(smooth_mot) - s_idx) / fps_s >= 1.6:
+        if in_hold and 1.4 <= (len(smooth_mot) - s_idx) / fps_s <= 7.0:
             raw_holds.append(
                 self._build_hold_record(
                     frames_array=frames_array,
                     smooth_mot=smooth_mot,
                     smooth_grad=smooth_grad,
-                    body_width=body_width,
+                    smooth_expansion=smooth_expansion,
+                    smooth_skin=smooth_skin,
                     s_idx=s_idx,
                     e_idx=len(smooth_mot),
                     fps_s=fps_s,
@@ -499,10 +489,10 @@ class OllamaVisionScorer:
                 )
             )
 
-        # Si aucun hold strict n'a été trouvé (ex: rush court très actif), on élargit le seuil
+        # Si aucun hold strict n'a été trouvé, on élargit le seuil
         if not raw_holds:
             logger.warning("Aucun plateau isométrique strict détecté — recherche assouplie...")
-            mot_thresh_relaxed = max(4.0, float(np.median(smooth_mot)))
+            mot_thresh_relaxed = max(3.8, float(np.median(smooth_mot)))
             in_hold = False
             s_idx = 0
             for i in range(len(smooth_mot)):
@@ -517,13 +507,14 @@ class OllamaVisionScorer:
                     if in_hold:
                         in_hold = False
                         hold_len = (i - s_idx) / fps_s
-                        if hold_len >= 1.2:
+                        if 1.2 <= hold_len <= 7.0:
                             raw_holds.append(
                                 self._build_hold_record(
                                     frames_array=frames_array,
                                     smooth_mot=smooth_mot,
                                     smooth_grad=smooth_grad,
-                                    body_width=body_width,
+                                    smooth_expansion=smooth_expansion,
+                                    smooth_skin=smooth_skin,
                                     s_idx=s_idx,
                                     e_idx=i,
                                     fps_s=fps_s,
@@ -531,7 +522,7 @@ class OllamaVisionScorer:
                                 )
                             )
 
-        # 6. Détection intelligente du plan d'Intro (la mise en place sous le spot)
+        # 8. Détection intelligente du plan d'Intro (la mise en place sous le spot)
         intro_cand: Optional[PoseCandidateWindow] = None
         if raw_holds and duration >= 14.0:
             first_hold_start = min(h["start"] for h in raw_holds)
@@ -550,7 +541,7 @@ class OllamaVisionScorer:
             center_time=round((intro_start + intro_end) / 2.0, 3),
             start_time=intro_start,
             end_time=intro_end,
-            score=0.92,
+            score=8.5,
             motion_val=1.5,
             gradient_val=float(np.mean(smooth_grad)),
             descriptor=np.zeros(256, dtype=np.float32),
@@ -560,10 +551,10 @@ class OllamaVisionScorer:
             upright_aspect_ratio=upright_aspect,
         )
 
-        # 7. Tri par score biomécanique et élimination des doublons temporels
+        # 9. Tri par score esthétique et élimination des doublons temporels
         raw_holds.sort(key=lambda h: float(h["score"]), reverse=True)
         selected_holds: List[dict] = []
-        min_gap_sec = 4.0 if duration > 30.0 else 1.8
+        min_gap_sec = 3.5 if duration > 30.0 else 1.8
 
         for h in raw_holds:
             c_t = float(h["mid"])
@@ -592,12 +583,13 @@ class OllamaVisionScorer:
             )
 
         logger.info(
-            "Rush '%s' : %d vraies poses verrouillées détectées (intro @ %.1f-%.1fs, 1re pose @ %.1fs)",
+            "Rush '%s' : %d vraies poses esthétiques sélectionnées (intro @ %.1f-%.1fs, 1re pose @ %.1fs, top score=%.1f)",
             video_path.name,
             len(candidates),
             intro_start,
             intro_end,
             candidates[0].start_time if candidates else 0.0,
+            candidates[0].score if candidates else 0.0,
         )
         return candidates, intro_cand
 
@@ -606,19 +598,21 @@ class OllamaVisionScorer:
         frames_array: np.ndarray,
         smooth_mot: np.ndarray,
         smooth_grad: np.ndarray,
-        body_width: np.ndarray,
+        smooth_expansion: np.ndarray,
+        smooth_skin: np.ndarray,
         s_idx: int,
         e_idx: int,
         fps_s: float,
         w_small: int,
     ) -> dict:
-        """Construit l'analyse détaillée d'un plateau isométrique."""
+        """Construit l'analyse détaillée et le score esthétique d'un plateau isométrique."""
         h_start = round(s_idx / fps_s, 3)
         h_end = round(e_idx / fps_s, 3)
         h_len = round(h_end - h_start, 3)
         avg_g = float(np.mean(smooth_grad[s_idx:e_idx]))
         avg_m = float(np.mean(smooth_mot[s_idx:e_idx]))
-        avg_w = float(np.mean(body_width[s_idx:e_idx]))
+        avg_exp = float(np.mean(smooth_expansion[s_idx:e_idx]))
+        avg_skin = float(np.mean(smooth_skin[s_idx:e_idx]))
         mid_idx = (s_idx + e_idx) // 2
         mid_t = round(mid_idx / fps_s, 3)
 
@@ -629,18 +623,38 @@ class OllamaVisionScorer:
         if norm_d > 1e-5:
             desc /= norm_d
 
-        # Score qualité de pose : longue tenue stable + forte définition musculaire + silhouette déployée
-        score = float(
-            (avg_g * 0.45)
-            + (avg_w * 0.35)
-            + (min(8.0, h_len) * 2.5)
-            - (avg_m * 2.5)
-        )
+        # Composantes du score esthétique musculation :
+        # 1. Définition et striations musculaires (Sobel)
+        grad_pts = (avg_g / 22.0) * 35.0
 
-        # Classification morphologique de la pose selon le gabarit de la silhouette
+        # 2. Déploiement des bras & V-taper (coudes/dorsaux écartés)
+        expansion_pts = (min(55.0, avg_exp) / 55.0) * 30.0
+
+        # 3. Présence musculaire / peau exposée sous le spot
+        skin_pts = float(np.clip(avg_skin * 25.0, 0.0, 20.0))
+
+        # 4. Durée idéale de tenue (une vraie pose dure 1.8s à 4.2s)
+        if 1.8 <= h_len <= 4.2:
+            dur_pts = 15.0
+        elif h_len < 1.8:
+            dur_pts = 8.0
+        else:
+            # Pénalité pour les temps morts / repos prolongés (> 4.2s)
+            dur_pts = max(0.0, 15.0 - (h_len - 4.2) * 5.0)
+
+        # 5. Pénalité sévère si posture de repos (bras ballants le long du corps)
+        resting_penalty = 30.0 if avg_exp < 24.0 else 0.0
+        mot_penalty = float(avg_m * 2.5)
+
+        raw_score = float(grad_pts + expansion_pts + skin_pts + dur_pts - resting_penalty - mot_penalty)
+
+        # Normalisation sur l'échelle standard 7.0 - 9.9
+        normalized_score = float(np.clip(7.0 + (raw_score - 30.0) * (2.9 / 60.0), 7.0, 9.9))
+
         label = self._classify_pose_silhouette(
-            width_ratio=avg_w / float(w_small),
+            expansion_val=avg_exp,
             grad_val=avg_g,
+            skin_val=avg_skin,
         )
 
         return {
@@ -650,26 +664,34 @@ class OllamaVisionScorer:
             "mid": mid_t,
             "grad": avg_g,
             "mot": avg_m,
-            "width": avg_w,
-            "score": score,
+            "expansion": avg_exp,
+            "skin": avg_skin,
+            "raw_score": raw_score,
+            "score": round(normalized_score, 1),
             "desc": desc,
             "label": label,
         }
 
     @staticmethod
-    def _classify_pose_silhouette(width_ratio: float, grad_val: float) -> str:
-        """Détermine le type de pose musculation selon le gabarit et les reliefs."""
-        if width_ratio >= 0.72:
-            return "Front Double Biceps / Lat Spread"
-        if width_ratio >= 0.62:
+    def _classify_pose_silhouette(
+        expansion_val: float,
+        grad_val: float,
+        skin_val: float,
+    ) -> str:
+        """Détermine le type de pose musculation selon le gabarit biomécanique et le relief."""
+        if expansion_val >= 40.0:
             if grad_val >= 18.0:
-                return "Most Muscular (Crab / Flex)"
+                return "Back Double Biceps / Overhead Flex"
             return "Front Lat Spread (V-Taper)"
-        if width_ratio <= 0.48:
-            return "Side Chest & Biceps Lock"
-        if grad_val >= 17.0:
-            return "Abdominals & Thighs Flex"
-        return "Classic Aesthetic Pose"
+        if expansion_val >= 32.0:
+            if skin_val >= 0.50:
+                return "Most Muscular (Crab / Flex)"
+            return "Front Double Biceps"
+        if skin_val >= 0.45 and expansion_val <= 30.0:
+            return "Side Chest & Triceps Lock"
+        if grad_val >= 16.0:
+            return "Abdominals & Serratus Flex"
+        return "Classic Aesthetic Flex"
 
     def _extract_fast_grayscale_frames(
         self,
@@ -805,10 +827,10 @@ class OllamaVisionScorer:
             return FrameEffortScore(
                 video_filename=candidate.video_path.name,
                 timestamp=round(candidate.center_time, 2),
-                effort_score=round(float(np.clip(7.5 + candidate.score * 2.2, 7.0, 9.8)), 1),
+                effort_score=round(candidate.score, 1),
                 exercise_detected=candidate.pose_label,
                 is_peak_contraction=True,
-                reasoning="Pose verrouillée détectée par analyse de stabilité",
+                reasoning="Pose esthétique verrouillée détectée par analyse biomécanique",
             )
 
         payload = {
@@ -823,16 +845,9 @@ class OllamaVisionScorer:
             resp = await client.post(f"{self.ollama_base_url}/api/generate", json=payload)
             resp.raise_for_status()
             parsed = self._parse_llm_json(resp.json().get("response", "{}"))
-            score = float(np.clip(float(parsed.get("effort_score", 8.5)), 1.0, 10.0))
+            score = float(np.clip(float(parsed.get("effort_score", candidate.score)), 7.0, 10.0))
             pose_name = str(parsed.get("exercise_detected") or candidate.pose_label)
             reasoning = str(parsed.get("reasoning") or "Évaluation LLaVA")
-            rot_needed = int(parsed.get("rotation_needed", 0) or 0)
-            if rot_needed in (90, 180, 270):
-                candidate.rotation_correction = (candidate.rotation_correction + rot_needed) % 360
-                if rot_needed in (90, 270):
-                    candidate.upright_aspect_ratio = (
-                        "16:9" if candidate.upright_aspect_ratio == "9:16" else "9:16"
-                    )
             return FrameEffortScore(
                 video_filename=candidate.video_path.name,
                 timestamp=round(candidate.center_time, 2),
@@ -845,10 +860,10 @@ class OllamaVisionScorer:
             return FrameEffortScore(
                 video_filename=candidate.video_path.name,
                 timestamp=round(candidate.center_time, 2),
-                effort_score=round(float(np.clip(7.5 + candidate.score * 2.2, 7.0, 9.8)), 1),
+                effort_score=round(candidate.score, 1),
                 exercise_detected=candidate.pose_label,
                 is_peak_contraction=True,
-                reasoning=f"Pose #{pose_index} sélectionnée par stabilité isométrique & contraste",
+                reasoning=f"Pose #{pose_index} sélectionnée par analyse esthétique & striations",
             )
 
     @classmethod
