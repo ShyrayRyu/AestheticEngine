@@ -93,6 +93,32 @@ class SelectedVideoSegment(BaseModel):
     )
 
 
+class RenderStyleCategory(BaseModel):
+    """
+    Catégorie de style de rendu déduite des vidéos d'exemples fournies
+    ou parmi les styles esthétiques phares.
+    """
+
+    id: str = Field(..., description="Identifiant unique du style (ex: custom_ex_0, preset_dark_phonk)")
+    name: str = Field(..., description="Nom du style (ex: 'Dark Aesthetic Phonk (Coupes Énergiques)')")
+    description: str = Field(..., description="Description détaillée de l'ambiance et du rythme de montage")
+    badge: str = Field(default="", description="Tag visuel rapide (ex: 'Coupes 1.8s • 9:16 • Look Sombre')")
+    pacing_label: str = Field(default="Modéré", description="'Rapide', 'Modéré', ou 'Posé'")
+    average_cut_duration: float = Field(default=2.5, description="Durée moyenne d'un plan en secondes")
+    target_duration: float = Field(default=21.5, description="Durée totale suggérée (secondes)")
+    aspect_ratio: Literal["9:16", "16:9"] = Field(default="9:16", description="Format vidéo (9:16 ou 16:9)")
+    editing_mode: Literal["pose_cut", "speed_ramp"] = Field(default="pose_cut", description="Mode de découpe")
+    lut_preset: str = Field(default="natural_aesthetic", description="Preset colorimétrique conseillé")
+    drop_sensitivity: float = Field(default=0.65, description="Sensibilité de découpe")
+    has_audio: bool = Field(default=False, description="Indique si la musique de cet exemple est disponible")
+    audio_url: Optional[str] = Field(default=None, description="URL de la piste audio de cet exemple")
+    bpm: Optional[float] = Field(default=None, description="BPM estimé")
+    cut_timestamps: List[float] = Field(default_factory=list, description="Timestamps des coupes de référence")
+    source_example_filename: Optional[str] = Field(default=None, description="Nom du fichier d'exemple associé")
+    thumbnail_url: Optional[str] = Field(default=None, description="Vignette d'aperçu de l'exemple")
+    is_from_user_example: bool = Field(default=False, description="True si ce style découle d'un exemple uploadé")
+
+
 class InspirationAnalysisResult(BaseModel):
     """Résultat de l'analyse d'une vidéo TikTok d'inspiration déposée en référence."""
 
@@ -110,11 +136,27 @@ class InspirationAnalysisResult(BaseModel):
         default=False,
         description="Indique si la musique de la vidéo d'inspiration a été extraite avec succès",
     )
+    bpm: Optional[float] = Field(
+        default=None,
+        description="BPM estimé si une piste audio a été analysée",
+    )
+    thumbnail_url: Optional[str] = Field(
+        default=None,
+        description="URL de la vignette de prévisualisation de l'exemple",
+    )
+    suggested_category_id: Optional[str] = Field(
+        default=None,
+        description="Identifiant de la catégorie de style associée à cet exemple",
+    )
 
 
 class ProcessProjectRequest(BaseModel):
     """Paramètres configurables par l'utilisateur lors du lancement du rendu."""
 
+    selected_category_id: Optional[str] = Field(
+        default=None,
+        description="ID du style de rendu choisi par l'utilisateur parmi les catégories générées.",
+    )
     aspect_ratio: Literal["9:16", "16:9"] = Field(
         default="9:16",
         description="Format de sortie : 9:16 (Vertical TikTok 1080x1920) ou 16:9 (Paysage 1920x1080), sans rognage ni étirement.",
@@ -180,13 +222,15 @@ class ProcessProjectRequest(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    """Réponse renvoyée après l'upload des rushs vidéo, de la piste audio et de l'inspiration."""
+    """Réponse renvoyée après l'upload des rushs vidéo, de la piste audio et des exemples."""
 
     project_id: str
     message: str
     video_files: List[str]
     audio_file: Optional[str] = None
     inspiration_file: Optional[str] = None
+    inspiration_files: List[str] = Field(default_factory=list)
+    render_categories: List[RenderStyleCategory] = Field(default_factory=list)
 
 
 class ProjectStatusResponse(BaseModel):
@@ -199,7 +243,11 @@ class ProjectStatusResponse(BaseModel):
     video_files: List[str] = Field(default_factory=list)
     audio_file: Optional[str] = None
     inspiration_file: Optional[str] = None
+    inspiration_files: List[str] = Field(default_factory=list)
     inspiration_analysis: Optional[InspirationAnalysisResult] = None
+    inspiration_analyses: List[InspirationAnalysisResult] = Field(default_factory=list)
+    render_categories: List[RenderStyleCategory] = Field(default_factory=list)
+    selected_category_id: Optional[str] = None
     effective_aspect_ratio: Literal["9:16", "16:9"] = Field(
         default="9:16",
         description="Format final effectivement appliqué (9:16 ou 16:9) après détection IA du bon sens",

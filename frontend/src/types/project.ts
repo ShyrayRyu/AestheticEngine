@@ -57,15 +57,40 @@ export interface SelectedVideoSegment {
   hold_duration?: number
 }
 
+export interface RenderStyleCategory {
+  id: string
+  name: string
+  description: string
+  badge: string
+  pacing_label: string
+  average_cut_duration: number
+  target_duration: number
+  aspect_ratio: AspectRatioOption
+  editing_mode: EditingModeOption
+  lut_preset: string
+  drop_sensitivity: number
+  has_audio: boolean
+  audio_url?: string | null
+  bpm?: number | null
+  cut_timestamps: number[]
+  source_example_filename?: string | null
+  thumbnail_url?: string | null
+  is_from_user_example: boolean
+}
+
 export interface InspirationAnalysisResult {
   filename: string
   duration: number
   detected_aspect_ratio: AspectRatioOption
   scene_cuts: number[]
   audio_extracted: boolean
+  bpm?: number | null
+  thumbnail_url?: string | null
+  suggested_category_id?: string | null
 }
 
 export interface ProcessProjectRequest {
+  selected_category_id?: string | null
   aspect_ratio: AspectRatioOption
   auto_orient_and_frame: boolean
   editing_mode: EditingModeOption
@@ -87,6 +112,8 @@ export interface UploadResponse {
   video_files: string[]
   audio_file: string | null
   inspiration_file: string | null
+  inspiration_files: string[]
+  render_categories: RenderStyleCategory[]
 }
 
 export interface ProjectStatusResponse {
@@ -97,7 +124,11 @@ export interface ProjectStatusResponse {
   video_files: string[]
   audio_file: string | null
   inspiration_file: string | null
+  inspiration_files: string[]
   inspiration_analysis: InspirationAnalysisResult | null
+  inspiration_analyses: InspirationAnalysisResult[]
+  render_categories: RenderStyleCategory[]
+  selected_category_id?: string | null
   effective_aspect_ratio?: AspectRatioOption
   orientation_corrected?: boolean
   audio_analysis: AudioAnalysisResult | null

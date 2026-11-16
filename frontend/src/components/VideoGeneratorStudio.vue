@@ -50,14 +50,96 @@ import type {
   PipelineStage,
   ProcessProjectRequest,
   ProjectStatusResponse,
+  RenderStyleCategory,
 } from '@/types/project'
 
 // ---------------------------------------------------------------------------
-// ÉTAT RÉACTIF : FICHIERS DRAG-AND-DROP
+// ARCHÉTYPES DE RENDU PAR DÉFAUT (CURATED AESTHETIC STYLES)
+// ---------------------------------------------------------------------------
+const defaultCuratedCategories: RenderStyleCategory[] = [
+  {
+    id: 'preset_dark_phonk',
+    name: 'Dark Aesthetic Phonk (Coupes Franches Rapides)',
+    description:
+      'TikTok sombre et percutant. Coupes franches calées sur les kicks de basse toutes les ~2.0s, contraste profond pour faire ressortir les veines et striations musculaires.',
+    badge: 'Rapide • 9:16 • Dark Aesthetic • 130 BPM',
+    pacing_label: 'Rapide',
+    average_cut_duration: 2.0,
+    target_duration: 21.5,
+    aspect_ratio: '9:16',
+    editing_mode: 'pose_cut',
+    lut_preset: 'dark_aesthetic',
+    drop_sensitivity: 0.8,
+    has_audio: false,
+    audio_url: null,
+    bpm: 130.0,
+    cut_timestamps: [],
+    source_example_filename: null,
+    thumbnail_url: null,
+    is_from_user_example: false,
+  },
+  {
+    id: 'preset_pure_posing',
+    name: 'Aesthetic Posing Flow (Maintiens Longs & Épurés)',
+    description:
+      'Mise en valeur maximale des poses de bodybuilding. Plans tenus pendant 3.5s à 4.5s sur les poses isométriques verrouillées, étalonnage naturel valorisant le volume musculaire.',
+    badge: 'Posé • 9:16 • Natural Look • 105 BPM',
+    pacing_label: 'Posé',
+    average_cut_duration: 3.6,
+    target_duration: 24.0,
+    aspect_ratio: '9:16',
+    editing_mode: 'pose_cut',
+    lut_preset: 'natural_aesthetic',
+    drop_sensitivity: 0.45,
+    has_audio: false,
+    audio_url: null,
+    bpm: 105.0,
+    cut_timestamps: [],
+    source_example_filename: null,
+    thumbnail_url: null,
+    is_from_user_example: false,
+  },
+  {
+    id: 'preset_speed_ramp',
+    name: 'Speed Ramping Agressif (Amorce 1.35x + Ralenti 0.75x)',
+    description:
+      "Style très cinématique : accélération dynamique lors de l'amorce de la contraction puis ralenti lourd au pic de l'effort sur chaque drop.",
+    badge: 'Dynamique • 9:16 • Speed Ramping • 120 BPM',
+    pacing_label: 'Dynamique',
+    average_cut_duration: 2.5,
+    target_duration: 18.5,
+    aspect_ratio: '9:16',
+    editing_mode: 'speed_ramp',
+    lut_preset: 'dark_aesthetic',
+    drop_sensitivity: 0.65,
+    has_audio: false,
+    audio_url: null,
+    bpm: 120.0,
+    cut_timestamps: [],
+    source_example_filename: null,
+    thumbnail_url: null,
+    is_from_user_example: false,
+  },
+]
+
+// ---------------------------------------------------------------------------
+// ÉTAT RÉACTIF : FICHIERS DRAG-AND-DROP & CATÉGORIES DE RENDU
 // ---------------------------------------------------------------------------
 const videoFiles = ref<File[]>([])
 const audioFile = ref<File | null>(null)
-const inspirationFile = ref<File | null>(null)
+const inspirationFiles = ref<File[]>([])
+
+const availableCategories = ref<RenderStyleCategory[]>([...defaultCuratedCategories])
+const selectedCategoryId = ref<string>('preset_dark_phonk')
+const isAnalyzingExamples = ref(false)
+
+const selectedCategory = computed(() => {
+  return (
+    availableCategories.value.find((c) => c.id === selectedCategoryId.value) ||
+    availableCategories.value[0] ||
+    null
+  )
+})
 
 const isDraggingVideos = ref(false)
 const isDraggingAudio = ref(false)
@@ -71,6 +153,7 @@ const inspirationInputRef = ref<HTMLInputElement | null>(null)
 // ÉTAT RÉACTIF : PARAMÈTRES DU MOTEUR POSING & BEAT-CUT
 // ---------------------------------------------------------------------------
 const options = reactive<ProcessProjectRequest>({
+  selected_category_id: 'preset_dark_phonk',
   aspect_ratio: '9:16',
   auto_orient_and_frame: true,
   editing_mode: 'pose_cut',
@@ -80,8 +163,8 @@ const options = reactive<ProcessProjectRequest>({
   ollama_model: 'llava:latest',
   fast_speed_factor: 1.35,
   slow_speed_factor: 0.75,
-  lut_preset: 'natural_aesthetic',
-  drop_sensitivity: 0.65,
+  lut_preset: 'dark_aesthetic',
+  drop_sensitivity: 0.8,
   use_inspiration_audio: true,
   mute_output: false,
 })
@@ -218,26 +301,87 @@ function handleInspirationDrop(event: DragEvent) {
   isDraggingInspiration.value = false
   const droppedFiles = event.dataTransfer?.files
   if (!droppedFiles || droppedFiles.length === 0) return
-  setInspirationVideo(droppedFiles[0])
+  addInspirationVideos(Array.from(droppedFiles))
 }
 
 function handleInspirationSelect(event: Event) {
   const target = event.target as HTMLInputElement
   if (!target.files || target.files.length === 0) return
-  setInspirationVideo(target.files[0])
+  addInspirationVideos(Array.from(target.files))
   target.value = ''
 }
 
-function setInspirationVideo(file: File) {
+function addInspirationVideos(files: File[]) {
   uiError.value = null
-  if (
-    !file.type.startsWith('video/') &&
-    !/\.(mp4|mov|mkv|webm)$/i.test(file.name)
-  ) {
-    uiError.value = "Veuillez sélectionner une vidéo d'inspiration valide (.mp4, .mov)."
-    return
+  for (const file of files) {
+    if (
+      !file.type.startsWith('video/') &&
+      !/\.(mp4|mov|mkv|webm)$/i.test(file.name)
+    ) {
+      uiError.value = `Le fichier ${file.name} n'est pas une vidéo valide (.mp4, .mov).`
+      continue
+    }
+    if (
+      !inspirationFiles.value.some(
+        (f) => f.name === file.name && f.size === file.size
+      )
+    ) {
+      inspirationFiles.value.push(file)
+    }
   }
-  inspirationFile.value = file
+}
+
+function removeInspirationVideo(index: number) {
+  inspirationFiles.value.splice(index, 1)
+}
+
+function selectCategory(cat: RenderStyleCategory) {
+  selectedCategoryId.value = cat.id
+  options.selected_category_id = cat.id
+  options.aspect_ratio = cat.aspect_ratio
+  options.target_duration = cat.target_duration
+  options.editing_mode = cat.editing_mode
+  options.lut_preset = cat.lut_preset
+  options.drop_sensitivity = cat.drop_sensitivity
+  if (cat.has_audio) {
+    options.use_inspiration_audio = true
+  }
+}
+
+async function analyzeExamplesAndCreateCategories() {
+  if (inspirationFiles.value.length === 0) return
+  isAnalyzingExamples.value = true
+  uiError.value = null
+
+  try {
+    const videosToSend =
+      videoFiles.value.length > 0
+        ? videoFiles.value
+        : [inspirationFiles.value[0]]
+
+    const uploadRes = await uploadProjectMedia(
+      videosToSend,
+      audioFile.value,
+      inspirationFiles.value
+    )
+
+    if (uploadRes.render_categories && uploadRes.render_categories.length > 0) {
+      availableCategories.value = uploadRes.render_categories
+      const firstCustom = uploadRes.render_categories.find(
+        (c) => c.is_from_user_example
+      )
+      if (firstCustom) {
+        selectCategory(firstCustom)
+      }
+    }
+  } catch (err: unknown) {
+    uiError.value =
+      err instanceof Error
+        ? err.message
+        : "Échec de l'analyse des vidéos d'exemples."
+  } finally {
+    isAnalyzingExamples.value = false
+  }
 }
 
 function formatFileSize(bytes: number): string {
@@ -255,11 +399,17 @@ async function launchAutomatedEdit() {
   isUploading.value = true
 
   try {
+    options.selected_category_id = selectedCategoryId.value
+
     const uploadRes = await uploadProjectMedia(
       videoFiles.value,
       audioFile.value,
-      inspirationFile.value
+      inspirationFiles.value
     )
+
+    if (uploadRes.render_categories && uploadRes.render_categories.length > 0) {
+      availableCategories.value = uploadRes.render_categories
+    }
 
     isUploading.value = false
     isProcessing.value = true
@@ -290,6 +440,12 @@ function subscribeToProjectProgress(projectId: string) {
     activeSocket.onmessage = (event) => {
       const data: ProjectStatusResponse = JSON.parse(event.data)
       projectStatus.value = data
+      if (data.render_categories && data.render_categories.length > 0) {
+        availableCategories.value = data.render_categories
+      }
+      if (data.selected_category_id) {
+        selectedCategoryId.value = data.selected_category_id
+      }
       if (data.stage === 'completed' || data.stage === 'failed') {
         isProcessing.value = false
         cleanupConnections()
@@ -310,6 +466,12 @@ function startFallbackPolling(projectId: string) {
     try {
       const data = await fetchProjectStatus(projectId)
       projectStatus.value = data
+      if (data.render_categories && data.render_categories.length > 0) {
+        availableCategories.value = data.render_categories
+      }
+      if (data.selected_category_id) {
+        selectedCategoryId.value = data.selected_category_id
+      }
       if (data.stage === 'completed' || data.stage === 'failed') {
         isProcessing.value = false
         cleanupConnections()
@@ -589,17 +751,17 @@ onUnmounted(() => {
           </label>
         </Card>
 
-        <!-- 3. Zone de dépôt d'une Vidéo d'Inspiration / Référence (Optionnelle) -->
+        <!-- 3. Zone de dépôt des Vidéos d'Exemples / Inspiration (Optionnel) -->
         <Card class="p-6">
           <div class="mb-4 flex items-center justify-between">
             <div class="flex items-center gap-2.5">
               <Eye class="h-5 w-5 text-red-500" />
               <h2 class="text-lg font-bold text-white">
-                3. Vidéo d'Inspiration / Référence (.mp4) — Optionnel
+                3. Vidéos d'Exemples / Inspiration (.mp4) — Multiples
               </h2>
             </div>
-            <Badge v-if="inspirationFile" variant="success">
-              Modèle d'inspiration actif
+            <Badge v-if="inspirationFiles.length > 0" variant="success">
+              {{ inspirationFiles.length }} exemple(s) prêt(s)
             </Badge>
             <Badge v-else variant="outline">
               Facultatif
@@ -621,53 +783,63 @@ onUnmounted(() => {
             <input
               ref="inspirationInputRef"
               type="file"
+              multiple
               accept="video/mp4,video/quicktime,.mp4,.mov"
               class="hidden"
               @change="handleInspirationSelect"
             />
 
-            <template v-if="!inspirationFile">
-              <Eye class="mb-2 h-6 w-6 text-red-500" />
-              <p class="text-sm font-medium text-zinc-200">
-                Glissez un TikTok de référence (ex: exemple.mp4) pour cloner son style
-              </p>
-              <p class="mt-1 text-xs text-zinc-500">
-                Clonage automatique : format (9:16 ou 16:9), durée exacte, rythme des cuts francs et bande-son
-              </p>
-            </template>
+            <Eye class="mb-2 h-6 w-6 text-red-500" />
+            <p class="text-sm font-medium text-zinc-200">
+              Glissez-déposez une ou plusieurs vidéos d'exemples TikTok (.mp4)
+            </p>
+            <p class="mt-1 text-xs text-zinc-500">
+              L'IA en déduit automatiquement des catégories de styles et vous propose de choisir votre rendu
+            </p>
+          </div>
 
+          <!-- Liste des vidéos d'exemples ajoutées -->
+          <div v-if="inspirationFiles.length > 0" class="mt-4 space-y-2">
             <div
-              v-else
-              class="flex w-full items-center justify-between rounded-lg bg-zinc-900/90 px-4 py-2.5"
-              @click.stop
+              v-for="(file, idx) in inspirationFiles"
+              :key="idx"
+              class="flex items-center justify-between rounded-lg bg-zinc-900/90 px-3.5 py-2 text-xs"
             >
-              <div class="flex items-center gap-3 truncate">
-                <Film class="h-5 w-5 shrink-0 text-red-400" />
-                <div class="text-left truncate">
-                  <p class="truncate text-sm font-semibold text-white">
-                    {{ inspirationFile.name }}
-                  </p>
-                  <p class="text-xs text-zinc-400">
-                    {{ formatFileSize(inspirationFile.size) }} • Format, Cuts & Audio clonés
-                  </p>
-                </div>
+              <div class="flex items-center gap-2.5 truncate">
+                <Film class="h-4 w-4 shrink-0 text-red-400" />
+                <span class="truncate font-semibold text-white">{{ file.name }}</span>
+                <span class="text-zinc-500 font-mono">({{ formatFileSize(file.size) }})</span>
               </div>
               <Button
                 variant="ghost"
                 size="sm"
-                @click="inspirationFile = null"
+                class="h-7 px-2 text-zinc-400 hover:text-red-400"
+                @click="removeInspirationVideo(idx)"
               >
-                Retirer
+                <Trash2 class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+
+            <div class="pt-2 flex justify-end">
+              <Button
+                variant="secondary"
+                size="sm"
+                :disabled="isAnalyzingExamples || isUploading || isProcessing"
+                @click="analyzeExamplesAndCreateCategories"
+              >
+                <Loader2 v-if="isAnalyzingExamples" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                <Sparkles v-else class="mr-1.5 h-3.5 w-3.5 text-red-400" />
+                {{ isAnalyzingExamples ? 'Analyse en cours...' : 'Créer les styles à partir de ces exemples' }}
               </Button>
             </div>
           </div>
 
           <label
-            v-if="inspirationFile && !audioFile && !options.mute_output"
+            v-if="inspirationFiles.length > 0 && !audioFile && !options.mute_output"
             class="mt-3 flex items-center justify-between rounded-xl border border-zinc-800/80 bg-zinc-950/60 px-3.5 py-2 cursor-pointer"
           >
             <span class="text-xs text-zinc-300">
-              Extraire et utiliser automatiquement la musique de la vidéo d'inspiration
+              Extraire et utiliser la musique de l'exemple sélectionné
             </span>
             <input
               v-model="options.use_inspiration_audio"
@@ -681,11 +853,34 @@ onUnmounted(() => {
       <!-- COLONNE DROITE : CONFIGURATION FORMAT, RYTHME & COULEURS (5 colonnes) -->
       <div class="space-y-6 lg:col-span-5">
         <Card class="p-6 space-y-5">
-          <div class="flex items-center gap-2.5 border-b border-zinc-800 pb-3">
-            <Wand2 class="h-5 w-5 text-red-500" />
-            <h2 class="text-lg font-bold text-white">
-              Réglages du Montage Posing
-            </h2>
+          <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
+            <div class="flex items-center gap-2.5">
+              <Wand2 class="h-5 w-5 text-red-500" />
+              <h2 class="text-lg font-bold text-white">
+                Réglages du Montage Posing
+              </h2>
+            </div>
+            <Badge v-if="selectedCategory" variant="outline" class="text-xs">
+              {{ selectedCategory.pacing_label }}
+            </Badge>
+          </div>
+
+          <!-- Style de rendu actif sélectionné -->
+          <div
+            v-if="selectedCategory"
+            class="rounded-xl border border-red-900/60 bg-red-950/20 p-3"
+          >
+            <span class="text-[10px] font-bold uppercase tracking-wider text-red-400 block mb-1">
+              Style de Rendu Actif :
+            </span>
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-xs font-bold text-white truncate">
+                {{ selectedCategory.name }}
+              </p>
+              <span class="shrink-0 text-[11px] font-mono text-zinc-400">
+                {{ selectedCategory.aspect_ratio }} • {{ selectedCategory.target_duration.toFixed(1) }}s
+              </span>
+            </div>
           </div>
 
           <!-- Choix du Format : 9:16 ou 16:9 (Sans rognage ni recadrage) -->
@@ -885,6 +1080,165 @@ onUnmounted(() => {
           </Button>
         </Card>
       </div>
+
+      <!-- SECTION INTERACTIVE PLEINE LARGEUR : CHOIX DU TYPE DE RENDU & CATÉGORIES (12 colonnes) -->
+      <div class="lg:col-span-12">
+        <Card class="p-6 border-zinc-800 bg-zinc-950/80 shadow-2xl">
+          <div class="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 pb-4">
+            <div class="flex items-center gap-3">
+              <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-red-950/60 border border-red-500/40 text-red-400">
+                <Sparkles class="h-5 w-5" />
+              </div>
+              <div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <h2 class="text-lg font-bold text-white">
+                    Quel type de rendu souhaitez-vous ?
+                  </h2>
+                  <Badge variant="outline" class="text-xs">
+                    {{ availableCategories.length }} styles au choix
+                  </Badge>
+                </div>
+                <p class="text-xs text-zinc-400 mt-0.5">
+                  L'IA a catégorisé vos vidéos d'exemples ci-dessous. Cliquez sur le style souhaité pour appliquer automatiquement son rythme, son cadrage et son look.
+                </p>
+              </div>
+            </div>
+
+            <div v-if="inspirationFiles.length > 0" class="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                :disabled="isAnalyzingExamples || isUploading || isProcessing"
+                @click="analyzeExamplesAndCreateCategories"
+              >
+                <Loader2 v-if="isAnalyzingExamples" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                <Sparkles v-else class="mr-1.5 h-3.5 w-3.5 text-red-400" />
+                {{ isAnalyzingExamples ? 'Analyse des exemples...' : 'Analyser mes exemples' }}
+              </Button>
+            </div>
+          </div>
+
+          <!-- Grille des Catégories de Rendu -->
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div
+              v-for="cat in availableCategories"
+              :key="cat.id"
+              class="group relative flex flex-col justify-between rounded-xl border p-4 text-left transition-all cursor-pointer"
+              :class="
+                selectedCategoryId === cat.id
+                  ? 'border-red-500/90 bg-red-950/30 ring-2 ring-red-500/50 shadow-xl shadow-red-950/40'
+                  : 'border-zinc-800/90 bg-zinc-900/60 hover:border-zinc-700 hover:bg-zinc-900/90'
+              "
+              @click="selectCategory(cat)"
+            >
+              <div>
+                <!-- Aperçu visuel si vignette présente -->
+                <div
+                  v-if="cat.thumbnail_url"
+                  class="relative mb-3 aspect-[16/9] max-h-36 w-full overflow-hidden rounded-lg bg-black border border-zinc-800 flex items-center justify-center"
+                >
+                  <img
+                    :src="`${API_BASE_URL}${cat.thumbnail_url}`"
+                    :alt="cat.name"
+                    class="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+                    loading="lazy"
+                  />
+                  <span
+                    class="absolute bottom-2 left-2 rounded bg-black/80 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-sm"
+                  >
+                    {{ cat.aspect_ratio }} • {{ cat.target_duration.toFixed(1) }}s
+                  </span>
+                  <span
+                    v-if="cat.bpm"
+                    class="absolute bottom-2 right-2 rounded bg-red-950/80 border border-red-500/40 px-2 py-0.5 text-[10px] font-bold text-red-300 backdrop-blur-sm"
+                  >
+                    {{ cat.bpm }} BPM
+                  </span>
+                </div>
+
+                <!-- En-tête de la Catégorie -->
+                <div class="flex items-start justify-between gap-2">
+                  <div>
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                      <Badge
+                        :variant="cat.is_from_user_example ? 'success' : 'secondary'"
+                        class="text-[10px] uppercase font-bold"
+                      >
+                        {{ cat.is_from_user_example ? 'Déduit de votre exemple' : 'Style Curated' }}
+                      </Badge>
+                      <Badge variant="outline" class="text-[10px]">
+                        {{ cat.pacing_label }}
+                      </Badge>
+                    </div>
+                    <h3 class="mt-1.5 text-sm font-bold text-white group-hover:text-red-300 transition-colors">
+                      {{ cat.name }}
+                    </h3>
+                  </div>
+
+                  <div
+                    class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border transition-all"
+                    :class="
+                      selectedCategoryId === cat.id
+                        ? 'border-red-500 bg-red-500 text-white'
+                        : 'border-zinc-700 bg-zinc-950 text-transparent'
+                    "
+                  >
+                    <CheckCircle2 class="h-3.5 w-3.5" />
+                  </div>
+                </div>
+
+                <!-- Description -->
+                <p class="mt-2 text-xs text-zinc-400 line-clamp-3">
+                  {{ cat.description }}
+                </p>
+              </div>
+
+              <!-- Paramètres clés & Bouton Sélectionner -->
+              <div class="mt-4 border-t border-zinc-800/80 pt-3">
+                <div class="grid grid-cols-2 gap-1.5 text-[11px] font-mono text-zinc-400 mb-3">
+                  <span class="truncate">Format : <strong class="text-zinc-200">{{ cat.aspect_ratio }}</strong></span>
+                  <span class="truncate">Durée : <strong class="text-zinc-200">{{ cat.target_duration.toFixed(1) }}s</strong></span>
+                  <span class="truncate">Rythme : <strong class="text-zinc-200">~{{ cat.average_cut_duration }}s/plan</strong></span>
+                  <span class="truncate">Look : <strong class="text-zinc-200">{{ cat.lut_preset }}</strong></span>
+                </div>
+
+                <button
+                  type="button"
+                  class="w-full rounded-lg py-1.5 text-center text-xs font-semibold transition-all"
+                  :class="
+                    selectedCategoryId === cat.id
+                      ? 'bg-red-600 text-white shadow-md'
+                      : 'bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700 hover:text-white'
+                  "
+                >
+                  {{ selectedCategoryId === cat.id ? '✓ Type de rendu actif' : 'Choisir ce style de rendu' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bannière récapitulative du style sélectionné -->
+          <div
+            v-if="selectedCategory"
+            class="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-900/60 bg-red-950/20 px-4 py-3"
+          >
+            <div class="flex items-center gap-3">
+              <CheckCircle2 class="h-5 w-5 text-emerald-400 shrink-0" />
+              <div class="text-xs">
+                <p class="font-bold text-white">
+                  Type de rendu actif : {{ selectedCategory.name }}
+                </p>
+                <p class="text-zinc-400 mt-0.5">
+                  Le montage sera généré en format <strong>{{ selectedCategory.aspect_ratio }}</strong>, avec un rythme <strong>{{ selectedCategory.pacing_label }}</strong> (~{{ selectedCategory.average_cut_duration }}s par pose) et un look <strong>{{ selectedCategory.lut_preset }}</strong>.
+                </p>
+              </div>
+            </div>
+            <Badge variant="success" class="text-xs">
+              Prêt pour la génération
+            </Badge>
+          </div>
+        </Card>
+      </div>
     </div>
 
     <!-- ===================================================================== -->
@@ -952,6 +1306,13 @@ onUnmounted(() => {
             Timeline des Poses & Coupes Franches (Sans Transition)
           </span>
           <div class="flex flex-wrap items-center gap-2">
+            <Badge
+              v-if="selectedCategory"
+              variant="outline"
+              class="border-red-500/40 text-red-300"
+            >
+              Style : {{ selectedCategory.name }}
+            </Badge>
             <Badge
               v-if="projectStatus.effective_aspect_ratio"
               :variant="projectStatus.orientation_corrected ? 'success' : 'secondary'"

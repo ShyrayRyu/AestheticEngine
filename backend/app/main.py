@@ -131,7 +131,11 @@ async def upload_project_media(
     ),
     inspiration: Optional[UploadFile] = File(
         default=None,
-        description="Vidéo TikTok d'inspiration optionnelle (.mp4, .mov) pour cloner le format, le rythme des cuts et la musique.",
+        description="Vidéo d'inspiration optionnelle (rétrocompatibilité pour 1 fichier).",
+    ),
+    inspirations: Optional[List[UploadFile]] = File(
+        default=None,
+        description="Une ou plusieurs vidéos d'exemples / inspiration (.mp4, .mov) pour déduire des styles et catégories.",
     ),
 ) -> UploadResponse:
     if not videos:
@@ -171,29 +175,63 @@ async def upload_project_media(
         with dest_audio_path.open("wb") as buffer:
             shutil.copyfileobj(audio.file, buffer)
 
-    inspiration_name: Optional[str] = None
-    if inspiration is not None and inspiration.filename:
-        inspiration_name = Path(inspiration.filename).name
-        dest_insp_path = inspiration_dir / inspiration_name
+    # Récupération de toutes les vidéos d'inspiration (liste et/ou fichier unique)
+    raw_inspirations: List[UploadFile] = []
+    if inspirations:
+        raw_inspirations.extend(inspirations)
+    if inspiration is not None and inspiration.filename and inspiration not in raw_inspirations:
+        raw_inspirations.append(inspiration)
+
+    saved_inspiration_names: List[str] = []
+    saved_inspiration_paths: List[Path] = []
+
+    for idx, insp_file in enumerate(raw_inspirations):
+        if not insp_file.filename:
+            continue
+        orig_name = Path(insp_file.filename).name
+        ext = Path(orig_name).suffix.lower() or ".mp4"
+        if ext not in allowed_video_exts:
+            continue
+        safe_name = f"{idx + 1:02d}_{orig_name}"
+        dest_insp_path = inspiration_dir / safe_name
         with dest_insp_path.open("wb") as buffer:
-            shutil.copyfileobj(inspiration.file, buffer)
+            shutil.copyfileobj(insp_file.file, buffer)
+        saved_inspiration_names.append(safe_name)
+        saved_inspiration_paths.append(dest_insp_path)
+
+    # Analyse et catégorisation des vidéos d'inspiration
+    insp_thumbs_dir = settings.exports_dir / project_id / "inspiration_thumbs"
+    insp_thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    insp_analyzer = InspirationVideoAnalyzer()
+    insp_analyses, render_categories = await asyncio.to_thread(
+        insp_analyzer.categorize_inspirations,
+        inspiration_paths=saved_inspiration_paths,
+        project_id=project_id,
+        thumbs_dir=insp_thumbs_dir,
+        audio_dir=audio_dir,
+    )
+
+    primary_insp_name = saved_inspiration_names[0] if saved_inspiration_names else None
+    primary_analysis = insp_analyses[0] if insp_analyses else None
 
     audio_status_msg = (
         f"piste '{audio_name}'"
         if audio_name
         else (
-            f"inspiration '{inspiration_name}'"
-            if inspiration_name
+            f"{len(saved_inspiration_names)} exemple(s) d'inspiration"
+            if saved_inspiration_names
             else "mode sans musique (son vidéo coupé à 0)"
         )
     )
 
-    logs = [f"[UPLOAD] Projet #{project_id} créé avec {len(saved_video_names)} rush(s) vidéo."]
-    if inspiration_name:
-        logs.append(f"[INSPIRATION] Vidéo de référence chargée : {inspiration_name}")
+    logs = [
+        f"[UPLOAD] Projet #{project_id} créé avec {len(saved_video_names)} rush(s) vidéo.",
+        f"[CATÉGORIES] {len(render_categories)} styles de rendu configurés ({len(saved_inspiration_names)} exemple(s) analysé(s)).",
+    ]
     if audio_name:
         logs.append(f"[UPLOAD] Piste audio chargée : {audio_name}")
-    elif not inspiration_name:
+    elif not saved_inspiration_names:
         logs.append("[UPLOAD] Aucune musique sélectionnée → Montage sans musique (son vidéo forcé à 0).")
 
     PROJECTS_STATE[project_id] = ProjectStatusResponse(
@@ -201,20 +239,29 @@ async def upload_project_media(
         stage=PipelineStage.UPLOADED,
         progress_percent=5,
         current_step_detail=(
-            f"{len(saved_video_names)} rush(s) vidéo et {audio_status_msg} prêts pour l'analyse."
+            f"{len(saved_video_names)} rush(s) vidéo prêts. {len(render_categories)} types de rendu disponibles au choix."
         ),
         video_files=saved_video_names,
         audio_file=audio_name,
-        inspiration_file=inspiration_name,
+        inspiration_file=primary_insp_name,
+        inspiration_files=saved_inspiration_names,
+        inspiration_analysis=primary_analysis,
+        inspiration_analyses=insp_analyses,
+        render_categories=render_categories,
+        selected_category_id=render_categories[0].id if render_categories else None,
         logs=logs,
     )
 
     return UploadResponse(
         project_id=project_id,
-        message="Fichiers uploadés avec succès. Prêt à lancer le traitement.",
+        message=(
+            f"Fichiers uploadés avec succès. {len(render_categories)} types de rendu sont proposés."
+        ),
         video_files=saved_video_names,
         audio_file=audio_name,
-        inspiration_file=inspiration_name,
+        inspiration_file=primary_insp_name,
+        inspiration_files=saved_inspiration_names,
+        render_categories=render_categories,
     )
 
 
@@ -318,6 +365,49 @@ async def get_segment_thumbnail(project_id: str, thumb_idx: int) -> FileResponse
     )
 
 
+@app.get(
+    "/api/v1/projects/{project_id}/inspiration-thumbnail/{example_idx}",
+    tags=["Inspirations"],
+)
+async def get_inspiration_thumbnail(project_id: str, example_idx: int) -> FileResponse:
+    """Sert la vignette JPEG d'une vidéo d'exemple / inspiration."""
+    thumb_path = (
+        settings.exports_dir
+        / project_id
+        / "inspiration_thumbs"
+        / f"inspiration_thumb_{example_idx}.jpg"
+    )
+    if not thumb_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Vignette d'inspiration #{example_idx} introuvable."
+        )
+    return FileResponse(
+        path=thumb_path,
+        media_type="image/jpeg",
+        filename=thumb_path.name,
+    )
+
+
+@app.get(
+    "/api/v1/projects/{project_id}/inspiration-audio/{example_idx}",
+    tags=["Inspirations"],
+)
+async def get_inspiration_audio(project_id: str, example_idx: int) -> FileResponse:
+    """Sert la piste audio MP3 extraite d'une vidéo d'exemple / inspiration."""
+    audio_path = (
+        settings.uploads_dir / project_id / "audio" / f"inspiration_{example_idx}.mp3"
+    )
+    if not audio_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Piste audio de l'exemple #{example_idx} introuvable."
+        )
+    return FileResponse(
+        path=audio_path,
+        media_type="audio/mpeg",
+        filename=audio_path.name,
+    )
+
+
 def _extract_segment_thumbnail(
     src_video: Path,
     peak_time: float,
@@ -413,9 +503,59 @@ async def _run_full_editing_pipeline(
         inspiration_cuts = None
 
         # ---------------------------------------------------------------------
-        # ÉTAPE 0 (OPTIONNELLE) : ANALYSE DE LA VIDÉO D'INSPIRATION
+        # ÉTAPE 0 : APPLICATION DE LA CATÉGORIE DE STYLE CHOISIE / EXEMPLES
         # ---------------------------------------------------------------------
-        if inspiration_path is not None and inspiration_path.exists():
+        chosen_category: Optional[RenderStyleCategory] = None
+        if options.selected_category_id and project.render_categories:
+            chosen_category = next(
+                (c for c in project.render_categories if c.id == options.selected_category_id),
+                None,
+            )
+        elif project.selected_category_id and project.render_categories:
+            chosen_category = next(
+                (c for c in project.render_categories if c.id == project.selected_category_id),
+                None,
+            )
+        elif project.render_categories:
+            chosen_category = project.render_categories[0]
+
+        if chosen_category is not None:
+            project.selected_category_id = chosen_category.id
+            effective_aspect_ratio = chosen_category.aspect_ratio
+            effective_target_duration = chosen_category.target_duration
+            options.editing_mode = chosen_category.editing_mode
+            options.lut_preset = chosen_category.lut_preset
+            options.drop_sensitivity = chosen_category.drop_sensitivity
+
+            if chosen_category.cut_timestamps:
+                inspiration_cuts = InspirationVideoAnalyzer.cuts_to_beat_drops(
+                    chosen_category.cut_timestamps
+                )
+
+            # Si l'utilisateur n'a pas fourni de son séparé et souhaite utiliser le son de l'exemple
+            if (
+                audio_path is None
+                and chosen_category.has_audio
+                and options.use_inspiration_audio
+                and not options.mute_output
+            ):
+                cat_idx_str = chosen_category.id.replace("custom_example_", "")
+                if cat_idx_str.isdigit():
+                    cand_audio = audio_dir / f"inspiration_{cat_idx_str}.mp3"
+                    if cand_audio.exists():
+                        audio_path = cand_audio
+
+            cuts_count_str = (
+                f"{len(chosen_category.cut_timestamps)} coupes clonées"
+                if chosen_category.cut_timestamps
+                else "coupes générées par Librosa"
+            )
+            project.logs.append(
+                f"[STYLE CHOISI] Catégorie '{chosen_category.name}' appliquée : "
+                f"Format={effective_aspect_ratio}, Durée={effective_target_duration:.1f}s, "
+                f"Look={options.lut_preset}, {cuts_count_str}."
+            )
+        elif inspiration_path is not None and inspiration_path.exists():
             _update_project(
                 project_id,
                 PipelineStage.ANALYZING_AUDIO,

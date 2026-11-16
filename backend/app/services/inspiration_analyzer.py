@@ -18,12 +18,16 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from app.models.schemas import BeatDropEvent, InspirationAnalysisResult
+from app.models.schemas import (
+    BeatDropEvent,
+    InspirationAnalysisResult,
+    RenderStyleCategory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,11 +138,16 @@ class InspirationVideoAnalyzer:
         prev_small: Optional[np.ndarray] = None
         prev_hist: Optional[np.ndarray] = None
         idx = 0
+        step = max(1, int(round(fps / 15.0)))
 
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
+
+            if idx % step != 0:
+                idx += 1
+                continue
 
             small = cv2.resize(frame, (64, 64))
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
@@ -224,3 +233,291 @@ class InspirationVideoAnalyzer:
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         return res.returncode == 0 and output_audio_path.exists() and output_audio_path.stat().st_size > 1024
+
+    @staticmethod
+    def _extract_thumbnail(video_path: Path, output_thumb: Path, timestamp: float = 2.5) -> bool:
+        """Extrait une image JPEG d'aperçu de la vidéo d'inspiration."""
+        output_thumb.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{max(0.5, timestamp):.2f}",
+            "-i",
+            str(video_path),
+            "-vf",
+            "scale=360:640:force_original_aspect_ratio=decrease",
+            "-vframes",
+            "1",
+            "-q:v",
+            "3",
+            str(output_thumb),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return res.returncode == 0 and output_thumb.exists() and output_thumb.stat().st_size > 512
+
+    @staticmethod
+    def _analyze_visual_tone(video_path: Path) -> Tuple[str, float, float]:
+        """
+        Analyse l'ambiance lumineuse, le contraste et la saturation pour suggérer
+        l'étalonnage adapté ('dark_aesthetic', 'natural_aesthetic', ou 'obsidian_monochrome').
+        """
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return "natural_aesthetic", 100.0, 50.0
+
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if n_frames < int(fps * 2):
+            cap.release()
+            return "natural_aesthetic", 100.0, 50.0
+
+        sample_pts = np.linspace(int(fps * 0.8), n_frames - int(fps * 0.8), 5, dtype=int)
+        lumas: List[float] = []
+        contrasts: List[float] = []
+        saturations: List[float] = []
+
+        for f_idx in sample_pts:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(f_idx))
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            v = hsv[:, :, 2]
+            s = hsv[:, :, 1]
+            lumas.append(float(np.mean(v)))
+            contrasts.append(float(np.std(v)))
+            saturations.append(float(np.mean(s)))
+
+        cap.release()
+        mean_luma = float(np.mean(lumas)) if lumas else 100.0
+        mean_contrast = float(np.mean(contrasts)) if contrasts else 50.0
+        mean_sat = float(np.mean(saturations)) if saturations else 50.0
+
+        if mean_sat < 22.0:
+            return "obsidian_monochrome", mean_luma, mean_contrast
+        if mean_luma < 85.0 and mean_contrast > 40.0:
+            return "dark_aesthetic", mean_luma, mean_contrast
+        return "natural_aesthetic", mean_luma, mean_contrast
+
+    @staticmethod
+    def _estimate_audio_bpm(audio_path: Path) -> Optional[float]:
+        """Estime rapidement le BPM de la piste audio de l'exemple via Librosa."""
+        if not audio_path.exists():
+            return None
+        try:
+            import librosa
+
+            y, sr = librosa.load(str(audio_path), sr=11025, duration=18.0, mono=True)
+            if y.size > sr * 2:
+                tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+                bpm_val = float(np.atleast_1d(tempo)[0])
+                if 50.0 <= bpm_val <= 230.0:
+                    return round(bpm_val, 1)
+        except Exception as exc:
+            logger.debug("Échec estimation BPM sur %s : %s", audio_path.name, exc)
+        return None
+
+    def categorize_inspirations(
+        self,
+        inspiration_paths: List[Path],
+        project_id: str,
+        thumbs_dir: Path,
+        audio_dir: Path,
+    ) -> Tuple[List[InspirationAnalysisResult], List[RenderStyleCategory]]:
+        """
+        Analyse une collection de vidéos d'exemples / inspirations, extrait leurs
+        caractéristiques clés (format, coupes, musique, look) et construit des
+        catégories de rendu personnalisées que l'utilisateur peut choisir.
+        """
+        results: List[InspirationAnalysisResult] = []
+        categories: List[RenderStyleCategory] = []
+
+        for idx, insp_path in enumerate(inspiration_paths):
+            audio_dest = audio_dir / f"inspiration_{idx}.mp3"
+            thumb_dest = thumbs_dir / f"inspiration_thumb_{idx}.jpg"
+
+            try:
+                # 1. Analyse de base de la structure vidéo et cuts
+                analysis = self.analyze_inspiration_video(
+                    inspiration_path=insp_path,
+                    extracted_audio_dest=audio_dest,
+                )
+
+                # 2. Extraction vignette d'aperçu
+                thumb_time = min(max(1.0, analysis.duration * 0.25), max(1.0, analysis.duration - 0.5))
+                if self._extract_thumbnail(insp_path, thumb_dest, thumb_time):
+                    analysis.thumbnail_url = (
+                        f"/api/v1/projects/{project_id}/inspiration-thumbnail/{idx}"
+                    )
+
+                # 3. Étalonnage et ambiance visuelle
+                lut_preset, _, _ = self._analyze_visual_tone(insp_path)
+
+                # 4. Analyse musicale de l'exemple
+                bpm: Optional[float] = None
+                if analysis.audio_extracted and audio_dest.exists():
+                    bpm = self._estimate_audio_bpm(audio_dest)
+                analysis.bpm = bpm
+
+                # 5. Pacing et densité des coupes
+                num_plans = len(analysis.scene_cuts) + 1
+                avg_cut = round(analysis.duration / max(1, num_plans), 2)
+
+                if avg_cut < 2.2:
+                    pacing = "Rapide"
+                    drop_sens = 0.85
+                    rhythm_desc = "Coupes franches très nerveuses et rythmées"
+                elif avg_cut <= 3.8:
+                    pacing = "Modéré"
+                    drop_sens = 0.65
+                    rhythm_desc = "Rythme de posing équilibré avec bonne tenue des poses"
+                else:
+                    pacing = "Posé"
+                    drop_sens = 0.40
+                    rhythm_desc = "Maintiens isométriques longs et posés sous la lumière"
+
+                if lut_preset == "dark_aesthetic":
+                    look_desc = "Look Dark Aesthetic (fort contraste & striations accentuées)"
+                    lut_badge = "Dark Aesthetic"
+                elif lut_preset == "obsidian_monochrome":
+                    look_desc = "Look Monochrome Obsidian (noir & blanc sculpté)"
+                    lut_badge = "Monochrome"
+                else:
+                    look_desc = "Look Natural Aesthetic (couleurs fidèles et netteté pure)"
+                    lut_badge = "Natural Look"
+
+                bpm_badge = (
+                    f"{int(bpm)} BPM"
+                    if bpm
+                    else ("Son inclus" if analysis.audio_extracted else "Muet")
+                )
+                category_id = f"custom_example_{idx}"
+                analysis.suggested_category_id = category_id
+
+                clean_name = (
+                    insp_path.stem.replace("media_", "Exemple ")
+                    .replace("_", " ")
+                    .title()
+                )
+                cat_title = f"Style #{idx + 1} : {clean_name} ({pacing})"
+                cat_desc = (
+                    f"Calqué sur '{insp_path.name}' : format {analysis.detected_aspect_ratio}, "
+                    f"{num_plans} plans (~{avg_cut}s par pose), {look_desc}. {rhythm_desc}."
+                )
+                cat_badge = (
+                    f"{pacing} • {analysis.detected_aspect_ratio} • {lut_badge} • {bpm_badge}"
+                )
+
+                categories.append(
+                    RenderStyleCategory(
+                        id=category_id,
+                        name=cat_title,
+                        description=cat_desc,
+                        badge=cat_badge,
+                        pacing_label=pacing,
+                        average_cut_duration=avg_cut,
+                        target_duration=analysis.duration,
+                        aspect_ratio=analysis.detected_aspect_ratio,
+                        editing_mode="pose_cut",
+                        lut_preset=lut_preset,
+                        drop_sensitivity=drop_sens,
+                        has_audio=analysis.audio_extracted,
+                        audio_url=(
+                            f"/api/v1/projects/{project_id}/inspiration-audio/{idx}"
+                            if analysis.audio_extracted
+                            else None
+                        ),
+                        bpm=bpm,
+                        cut_timestamps=analysis.scene_cuts,
+                        source_example_filename=insp_path.name,
+                        thumbnail_url=analysis.thumbnail_url,
+                        is_from_user_example=True,
+                    )
+                )
+                results.append(analysis)
+            except Exception as exc:
+                logger.warning(
+                    "Échec de l'analyse de l'inspiration %s : %s",
+                    insp_path.name,
+                    exc,
+                )
+                continue
+
+        # Catégories esthétiques prédéfinies complémentaires
+        curated_presets = [
+            RenderStyleCategory(
+                id="preset_dark_phonk",
+                name="Dark Aesthetic Phonk (Coupes Franches Rapides)",
+                description=(
+                    "TikTok musculation sombre et percutant. Coupes franches calées sur "
+                    "les kicks de basse toutes les ~2.0s, contraste profond pour faire "
+                    "ressortir les veines et striations musculaires."
+                ),
+                badge="Rapide • 9:16 • Dark Aesthetic • 130 BPM",
+                pacing_label="Rapide",
+                average_cut_duration=2.0,
+                target_duration=21.5,
+                aspect_ratio="9:16",
+                editing_mode="pose_cut",
+                lut_preset="dark_aesthetic",
+                drop_sensitivity=0.80,
+                has_audio=False,
+                audio_url=None,
+                bpm=130.0,
+                cut_timestamps=[],
+                source_example_filename=None,
+                thumbnail_url=None,
+                is_from_user_example=False,
+            ),
+            RenderStyleCategory(
+                id="preset_pure_posing",
+                name="Aesthetic Posing Flow (Maintiens Longs & Épurés)",
+                description=(
+                    "Mise en valeur maximale des poses de bodybuilding. Plans tenus "
+                    "pendant 3.5s à 4.5s sur les poses isométriques verrouillées, "
+                    "étalonnage naturel valorisant le volume musculaire."
+                ),
+                badge="Posé • 9:16 • Natural Look • 105 BPM",
+                pacing_label="Posé",
+                average_cut_duration=3.6,
+                target_duration=24.0,
+                aspect_ratio="9:16",
+                editing_mode="pose_cut",
+                lut_preset="natural_aesthetic",
+                drop_sensitivity=0.45,
+                has_audio=False,
+                audio_url=None,
+                bpm=105.0,
+                cut_timestamps=[],
+                source_example_filename=None,
+                thumbnail_url=None,
+                is_from_user_example=False,
+            ),
+            RenderStyleCategory(
+                id="preset_speed_ramp",
+                name="Speed Ramping Agressif (Amorce 1.35x + Ralenti 0.75x)",
+                description=(
+                    "Style très cinématique : accélération dynamique lors de l'amorce de "
+                    "la contraction puis ralenti lourd au pic de l'effort sur chaque drop."
+                ),
+                badge="Dynamique • 9:16 • Speed Ramping • 120 BPM",
+                pacing_label="Dynamique",
+                average_cut_duration=2.5,
+                target_duration=18.5,
+                aspect_ratio="9:16",
+                editing_mode="speed_ramp",
+                lut_preset="dark_aesthetic",
+                drop_sensitivity=0.65,
+                has_audio=False,
+                audio_url=None,
+                bpm=120.0,
+                cut_timestamps=[],
+                source_example_filename=None,
+                thumbnail_url=None,
+                is_from_user_example=False,
+            ),
+        ]
+
+        categories.extend(curated_presets)
+        return results, categories
