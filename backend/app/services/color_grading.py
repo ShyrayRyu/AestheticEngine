@@ -86,7 +86,15 @@ class DarkAestheticColorGrader:
         """
         output_video_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if lut_preset == "natural_aesthetic":
+        if lut_preset == "breath_divinity":
+            # Look "Breath Divinity" (Acier sombre, striations accentuées, verts désaturés, vignette subtile)
+            vf_chain = (
+                "eq=contrast=1.14:brightness=-0.02:saturation=0.88,"
+                "colorbalance=rs=-0.03:gs=0.01:bs=0.06:rm=-0.02:gm=0.0:bm=0.04,"
+                "unsharp=5:5:0.65:5:5:0.0,"
+                "vignette=PI/4.5,setsar=1"
+            )
+        elif lut_preset == "natural_aesthetic":
             # Rendu fidèle à `exemple.mp4` : couleurs et exposition d'origine + micro-netteté douce
             vf_chain = "unsharp=5:5:0.35:5:5:0.0,setsar=1"
         elif lut_preset == "obsidian_monochrome":

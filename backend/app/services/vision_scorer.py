@@ -324,9 +324,16 @@ class OllamaVisionScorer:
 
         # 2. Cas d'un rush horizontal (raw_w > raw_h, ex: 1920x1080)
         # On vérifie si l'athlète a filmé à la verticale sans balise de rotation
-        face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
+        face_cascade = None
+        if hasattr(cv2, "CascadeClassifier") and hasattr(cv2, "data") and hasattr(cv2.data, "haarcascades"):
+            try:
+                face_cascade = cv2.CascadeClassifier(
+                    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+                )
+            except Exception as e:
+                logger.warning("Impossible de charger le CascadeClassifier OpenCV : %s", e)
+                face_cascade = None
+
         scores: Dict[int, float] = {0: 1.0, 90: 0.0, 270: 0.0}
 
         for cand_angle in (0, 90, 270):
@@ -341,7 +348,7 @@ class OllamaVisionScorer:
                 gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
                 sh, sw = gray.shape[:2]
 
-                if not face_cascade.empty():
+                if face_cascade is not None and not face_cascade.empty():
                     faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(20, 20))
                     for fx, fy, fw, fh in faces:
                         cy = (fy + fh * 0.5) / float(sh)

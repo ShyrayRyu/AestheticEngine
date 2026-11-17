@@ -58,6 +58,27 @@ import type {
 // ---------------------------------------------------------------------------
 const defaultCuratedCategories: RenderStyleCategory[] = [
   {
+    id: 'preset_breath_divinity',
+    name: 'Breath Divinity (CapCut Velocity & Dark Aesthetic)',
+    description:
+      "Édit cinématique TikTok de haut niveau calqué sur le style 'Breath Divinity' : Velocity ramping dynamique, flash blanc d'impact et micro-zoom punch sur les beat drops, aberration chromatique et étalonnage acier sombre aux striations musculaires chirurgicales.",
+    badge: 'CapCut Velocity • Flash & Zoom FX • Look Acier Sombre',
+    pacing_label: 'Dynamique',
+    average_cut_duration: 1.8,
+    target_duration: 19.5,
+    aspect_ratio: '16:9',
+    editing_mode: 'breath_divinity',
+    lut_preset: 'breath_divinity',
+    drop_sensitivity: 0.85,
+    has_audio: false,
+    audio_url: null,
+    bpm: 90.0,
+    cut_timestamps: [],
+    source_example_filename: 'breath_divinity.mp4',
+    thumbnail_url: null,
+    is_from_user_example: false,
+  },
+  {
     id: 'preset_dark_phonk',
     name: 'Dark Aesthetic Phonk (Coupes Franches Rapides)',
     description:
@@ -130,7 +151,7 @@ const audioFile = ref<File | null>(null)
 const inspirationFiles = ref<File[]>([])
 
 const availableCategories = ref<RenderStyleCategory[]>([...defaultCuratedCategories])
-const selectedCategoryId = ref<string>('preset_dark_phonk')
+const selectedCategoryId = ref<string>('preset_breath_divinity')
 const isAnalyzingExamples = ref(false)
 
 const selectedCategory = computed(() => {
@@ -153,20 +174,24 @@ const inspirationInputRef = ref<HTMLInputElement | null>(null)
 // ÉTAT RÉACTIF : PARAMÈTRES DU MOTEUR POSING & BEAT-CUT
 // ---------------------------------------------------------------------------
 const options = reactive<ProcessProjectRequest>({
-  selected_category_id: 'preset_dark_phonk',
-  aspect_ratio: '9:16',
+  selected_category_id: 'preset_breath_divinity',
+  aspect_ratio: '16:9',
   auto_orient_and_frame: true,
-  editing_mode: 'pose_cut',
-  target_duration: 21.5,
+  editing_mode: 'breath_divinity',
+  target_duration: 19.5,
   include_intro_shot: true,
   min_effort_score: 7.0,
   ollama_model: 'llava:latest',
-  fast_speed_factor: 1.35,
-  slow_speed_factor: 0.75,
-  lut_preset: 'dark_aesthetic',
-  drop_sensitivity: 0.8,
+  fast_speed_factor: 2.2,
+  slow_speed_factor: 0.55,
+  lut_preset: 'breath_divinity',
+  drop_sensitivity: 0.85,
   use_inspiration_audio: true,
   mute_output: false,
+  enable_beat_flash: true,
+  enable_zoom_pulse: true,
+  enable_rgb_split: true,
+  enable_motion_blur: true,
 })
 
 // ---------------------------------------------------------------------------
@@ -938,15 +963,33 @@ onUnmounted(() => {
             </label>
           </div>
 
-          <!-- Style de Montage : Pose Cut 1.0x (Style exemple.mp4) vs Speed Ramp -->
+          <!-- Style de Montage : Breath Divinity vs Pose Cut vs Speed Ramp -->
           <div>
             <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">
-              Style de Coupe (Sans Transition)
+              Style de Coupe & Dynamique
             </label>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-3 gap-2.5">
               <button
                 type="button"
-                class="flex flex-col items-start rounded-xl border p-3 text-left text-xs transition-all"
+                class="flex flex-col items-start rounded-xl border p-2.5 text-left text-xs transition-all"
+                :class="
+                  options.editing_mode === 'breath_divinity'
+                    ? 'border-red-500 bg-red-950/40 text-white shadow-lg shadow-red-950/20'
+                    : 'border-zinc-800 bg-zinc-950/60 text-zinc-400 hover:border-zinc-700'
+                "
+                @click="options.editing_mode = 'breath_divinity'"
+              >
+                <div class="flex items-center gap-1">
+                  <span class="font-bold text-xs text-white">Breath Divinity 🔥</span>
+                </div>
+                <span class="mt-1 text-[10px] leading-tight opacity-80">
+                  CapCut Velocity, Impact Flash, Zoom Punch & Slow-Mo
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="flex flex-col items-start rounded-xl border p-2.5 text-left text-xs transition-all"
                 :class="
                   options.editing_mode === 'pose_cut'
                     ? 'border-red-500 bg-red-950/30 text-white'
@@ -954,15 +997,15 @@ onUnmounted(() => {
                 "
                 @click="options.editing_mode = 'pose_cut'"
               >
-                <span class="font-bold text-sm">Posing Cut 1.0x ★</span>
-                <span class="mt-0.5 text-[11px] opacity-80">
-                  Vitesse fluide naturelle, coupes franches sur les beats (comme exemple.mp4)
+                <span class="font-bold text-xs">Posing Cut 1.0x ★</span>
+                <span class="mt-1 text-[10px] leading-tight opacity-80">
+                  Vitesse fluide naturelle, coupes franches épurées
                 </span>
               </button>
 
               <button
                 type="button"
-                class="flex flex-col items-start rounded-xl border p-3 text-left text-xs transition-all"
+                class="flex flex-col items-start rounded-xl border p-2.5 text-left text-xs transition-all"
                 :class="
                   options.editing_mode === 'speed_ramp'
                     ? 'border-red-500 bg-red-950/30 text-white'
@@ -970,11 +1013,72 @@ onUnmounted(() => {
                 "
                 @click="options.editing_mode = 'speed_ramp'"
               >
-                <span class="font-bold text-sm">Speed Ramp Drop</span>
-                <span class="mt-0.5 text-[11px] opacity-80">
-                  Entrée rapide ({{ options.fast_speed_factor }}x) puis ralenti ({{ options.slow_speed_factor }}x)
+                <span class="font-bold text-xs">Speed Ramp Drop</span>
+                <span class="mt-1 text-[10px] leading-tight opacity-80">
+                  Entrée rapide ({{ options.fast_speed_factor }}x) puis ralenti
                 </span>
               </button>
+            </div>
+          </div>
+
+          <!-- Éléments d'Edit CapCut & Effets d'Impact -->
+          <div class="rounded-xl border border-zinc-800/80 bg-zinc-950/70 p-3">
+            <div class="flex items-center justify-between mb-2.5">
+              <span class="text-xs font-bold text-zinc-200 uppercase tracking-wider flex items-center gap-1.5">
+                <span>⚡ Éléments d'Édit CapCut</span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded bg-red-950/80 text-red-400 border border-red-800/40">PRO FX</span>
+              </span>
+              <span class="text-[10px] text-zinc-500">Synchronisé aux Beat Drops</span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2 text-xs">
+              <label class="flex items-center gap-2 rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-2 cursor-pointer hover:border-zinc-700">
+                <input
+                  v-model="options.enable_beat_flash"
+                  type="checkbox"
+                  class="h-3.5 w-3.5 accent-red-600 rounded"
+                />
+                <div>
+                  <span class="font-semibold text-zinc-200 block text-[11px]">Impact Flash Blanc</span>
+                  <span class="text-[10px] text-zinc-500">Éclair blanc sur le drop</span>
+                </div>
+              </label>
+
+              <label class="flex items-center gap-2 rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-2 cursor-pointer hover:border-zinc-700">
+                <input
+                  v-model="options.enable_zoom_pulse"
+                  type="checkbox"
+                  class="h-3.5 w-3.5 accent-red-600 rounded"
+                />
+                <div>
+                  <span class="font-semibold text-zinc-200 block text-[11px]">Zoom Punch / Shake</span>
+                  <span class="text-[10px] text-zinc-500">Secousse dynamique</span>
+                </div>
+              </label>
+
+              <label class="flex items-center gap-2 rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-2 cursor-pointer hover:border-zinc-700">
+                <input
+                  v-model="options.enable_rgb_split"
+                  type="checkbox"
+                  class="h-3.5 w-3.5 accent-red-600 rounded"
+                />
+                <div>
+                  <span class="font-semibold text-zinc-200 block text-[11px]">RGB Split (Glitch)</span>
+                  <span class="text-[10px] text-zinc-500">Aberration optique</span>
+                </div>
+              </label>
+
+              <label class="flex items-center gap-2 rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-2 cursor-pointer hover:border-zinc-700">
+                <input
+                  v-model="options.enable_motion_blur"
+                  type="checkbox"
+                  class="h-3.5 w-3.5 accent-red-600 rounded"
+                />
+                <div>
+                  <span class="font-semibold text-zinc-200 block text-[11px]">Motion Blur Fluide</span>
+                  <span class="text-[10px] text-zinc-500">Flou sur accélération</span>
+                </div>
+              </label>
             </div>
           </div>
 
@@ -1044,8 +1148,11 @@ onUnmounted(() => {
               v-model="options.lut_preset"
               class="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white focus:border-red-500 focus:outline-none"
             >
+              <option value="breath_divinity">
+                Breath Divinity ★ (Look Acier Sombre, Striations & Vignette Ciné)
+              </option>
               <option value="natural_aesthetic">
-                Naturel Net ★ (Fidèle au rush + Clarté musculaire — Style exemple.mp4)
+                Naturel Net (Fidèle au rush + Clarté musculaire — Style classique)
               </option>
               <option value="dark_aesthetic">
                 Dark Aesthetic Doux (Contraste subtil sans boucher les noirs)

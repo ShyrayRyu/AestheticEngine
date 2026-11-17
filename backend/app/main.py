@@ -723,6 +723,10 @@ async def _run_full_editing_pipeline(
             options.editing_mode,
             options.fast_speed_factor,
             options.slow_speed_factor,
+            options.enable_beat_flash,
+            options.enable_zoom_pulse,
+            options.enable_rgb_split,
+            options.enable_motion_blur,
             on_ramp_progress,
         )
         project.selected_segments = synced_segments

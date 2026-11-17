@@ -13,7 +13,7 @@ export type PipelineStage =
   | 'failed'
 
 export type AspectRatioOption = '9:16' | '16:9'
-export type EditingModeOption = 'pose_cut' | 'speed_ramp'
+export type EditingModeOption = 'pose_cut' | 'speed_ramp' | 'breath_divinity'
 
 export interface BeatDropEvent {
   timestamp: number
@@ -104,6 +104,10 @@ export interface ProcessProjectRequest {
   slow_speed_factor: number
   lut_preset: string
   drop_sensitivity: number
+  enable_beat_flash?: boolean
+  enable_zoom_pulse?: boolean
+  enable_rgb_split?: boolean
+  enable_motion_blur?: boolean
 }
 
 export interface UploadResponse {

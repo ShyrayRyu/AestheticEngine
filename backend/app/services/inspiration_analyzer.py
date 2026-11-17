@@ -447,6 +447,30 @@ class InspirationVideoAnalyzer:
         # Catégories esthétiques prédéfinies complémentaires
         curated_presets = [
             RenderStyleCategory(
+                id="preset_breath_divinity",
+                name="Breath Divinity (CapCut Velocity & Dark Aesthetic)",
+                description=(
+                    "Édit cinématique TikTok de haut niveau calqué sur le style 'Breath Divinity' : "
+                    "Velocity ramping dynamique, flash blanc d'impact et micro-zoom punch sur les beat drops, "
+                    "aberration chromatique et étalonnage acier sombre aux striations musculaires chirurgicales."
+                ),
+                badge="CapCut Velocity • Flash & Zoom FX • Look Acier Sombre",
+                pacing_label="Dynamique",
+                average_cut_duration=1.8,
+                target_duration=19.5,
+                aspect_ratio="16:9",
+                editing_mode="breath_divinity",
+                lut_preset="breath_divinity",
+                drop_sensitivity=0.85,
+                has_audio=False,
+                audio_url=None,
+                bpm=90.0,
+                cut_timestamps=[],
+                source_example_filename="breath_divinity.mp4",
+                thumbnail_url=None,
+                is_from_user_example=False,
+            ),
+            RenderStyleCategory(
                 id="preset_dark_phonk",
                 name="Dark Aesthetic Phonk (Coupes Franches Rapides)",
                 description=(

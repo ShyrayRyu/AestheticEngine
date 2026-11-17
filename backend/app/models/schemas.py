@@ -107,8 +107,11 @@ class RenderStyleCategory(BaseModel):
     average_cut_duration: float = Field(default=2.5, description="Durée moyenne d'un plan en secondes")
     target_duration: float = Field(default=21.5, description="Durée totale suggérée (secondes)")
     aspect_ratio: Literal["9:16", "16:9"] = Field(default="9:16", description="Format vidéo (9:16 ou 16:9)")
-    editing_mode: Literal["pose_cut", "speed_ramp"] = Field(default="pose_cut", description="Mode de découpe")
-    lut_preset: str = Field(default="natural_aesthetic", description="Preset colorimétrique conseillé")
+    editing_mode: Literal["pose_cut", "speed_ramp", "breath_divinity"] = Field(
+        default="breath_divinity",
+        description="Mode de découpe : 'pose_cut', 'speed_ramp' ou 'breath_divinity' (CapCut Velocity & FX)",
+    )
+    lut_preset: str = Field(default="breath_divinity", description="Preset colorimétrique conseillé")
     drop_sensitivity: float = Field(default=0.65, description="Sensibilité de découpe")
     has_audio: bool = Field(default=False, description="Indique si la musique de cet exemple est disponible")
     audio_url: Optional[str] = Field(default=None, description="URL de la piste audio de cet exemple")
@@ -165,9 +168,25 @@ class ProcessProjectRequest(BaseModel):
         default=True,
         description="Reconnaissance IA du bon sens de la vidéo (0°/90°/180°/270°) et interchange automatique entre 9:16 et 16:9 sans rogner ni recadrer.",
     )
-    editing_mode: Literal["pose_cut", "speed_ramp"] = Field(
-        default="pose_cut",
-        description="'pose_cut' = Coupes franches 1.0x sur les beats (style exemple.mp4) | 'speed_ramp' = Speed Ramping sur les drops.",
+    editing_mode: Literal["pose_cut", "speed_ramp", "breath_divinity"] = Field(
+        default="breath_divinity",
+        description="'breath_divinity' = CapCut Velocity Ramping & FX d'impact | 'pose_cut' = Coupes franches 1.0x | 'speed_ramp' = Speed Ramping classique.",
+    )
+    enable_beat_flash: bool = Field(
+        default=True,
+        description="Flash blanc dynamique (CapCut Impact Flash) synchronisé sur chaque Beat Drop.",
+    )
+    enable_zoom_pulse: bool = Field(
+        default=True,
+        description="Micro-zoom punch / Bass Shake sur les temps forts musicaux.",
+    )
+    enable_rgb_split: bool = Field(
+        default=True,
+        description="Effet d'aberration chromatique (RGB Shift) sur les transitions de plans.",
+    )
+    enable_motion_blur: bool = Field(
+        default=True,
+        description="Flou de mouvement cinématique / interpolation fluide sur les accélérations.",
     )
     target_duration: float = Field(
         default=21.5,

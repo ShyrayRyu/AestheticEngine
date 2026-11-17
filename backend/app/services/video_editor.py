@@ -47,15 +47,20 @@ class SpeedRampVideoEditor:
         output_raw_video_path: Path,
         effective_duration: float = 21.13,
         aspect_ratio: Literal["9:16", "16:9"] = "9:16",
-        editing_mode: Literal["pose_cut", "speed_ramp"] = "pose_cut",
+        editing_mode: Literal["pose_cut", "speed_ramp", "breath_divinity"] = "breath_divinity",
         fast_speed_factor: float = 1.35,
         slow_speed_factor: float = 0.75,
+        enable_beat_flash: bool = True,
+        enable_zoom_pulse: bool = True,
+        enable_rgb_split: bool = True,
+        enable_motion_blur: bool = True,
         progress_callback: Optional[Callable[[str, int], None]] = None,
     ) -> List[SelectedVideoSegment]:
         """
         Découpe chaque séquence de posing pour remplir exactement les intervalles
         musicaux `[0 -> drop_1, drop_1 -> drop_2, ..., drop_N -> effective_duration]`
-        par coupes franches sans transition, puis multiplexe la piste audio.
+        avec synchronisation millimétrée, velocity ramping et éléments d'edit CapCut
+        (Impact Flash, Zoom Punch, RGB Split & Flou cinématique).
         """
         if not segments:
             raise ValueError("Aucun segment vidéo disponible pour le montage.")
@@ -112,22 +117,57 @@ class SpeedRampVideoEditor:
 
             part_path = temp_dir / f"part_{idx:03d}.mp4"
 
-            if editing_mode == "pose_cut" or idx == 0:
-                # Mode Posing 1.0x (Style exemple.mp4) :
-                # Découpage strict au cœur du plateau de contraction isométrique verrouillé
-                # (Zéro transition, zéro mouvement de préparation, zéro relâchement).
+            if editing_mode == "breath_divinity" and idx > 0:
+                # Mode "Breath Divinity" (CapCut Velocity & Impact FX) :
+                # 1. Approche rapide (25-30% du slot) avec motion blur
+                # 2. Impact sur le beat drop (Flash blanc + Zoom punch + RGB Split)
+                # 3. Ralenti fluide (0.55x) sur le pic isométrique de contraction
+                vel_fast_factor = 2.20
+                vel_slow_factor = 0.55
+                fast_tl_dur = round(max(0.25, slot_duration * 0.28), 3)
+                slow_tl_dur = round(slot_duration - fast_tl_dur, 3)
+
+                src_pre_dur = fast_tl_dur * vel_fast_factor
+                src_post_dur = slow_tl_dur * vel_slow_factor
+
+                peak_ts = min(
+                    max(src_pre_dur + 0.2, seg.peak_time_in_source),
+                    max(src_pre_dur + 0.2, src_duration - src_post_dur - 0.1),
+                )
+                clip_start = max(0.0, peak_ts - src_pre_dur)
+                clip_end = min(src_duration, peak_ts + src_post_dur)
+
+                self._render_velocity_breath_divinity_part(
+                    src_path=src_path,
+                    part_path=part_path,
+                    pre_start=clip_start,
+                    peak_ts=peak_ts,
+                    fast_tl_dur=fast_tl_dur,
+                    slow_tl_dur=slow_tl_dur,
+                    fast_factor=vel_fast_factor,
+                    slow_factor=vel_slow_factor,
+                    crop_expr=crop_expr,
+                    temp_dir=temp_dir,
+                    part_idx=idx,
+                    target_w=target_w,
+                    target_h=target_h,
+                    enable_beat_flash=enable_beat_flash,
+                    enable_zoom_pulse=enable_zoom_pulse,
+                    enable_rgb_split=enable_rgb_split,
+                    enable_motion_blur=enable_motion_blur,
+                )
+                fast_f, slow_f = vel_fast_factor, vel_slow_factor
+            elif editing_mode == "pose_cut" or idx == 0:
+                # Mode Posing 1.0x (Style classique ou plan intro)
                 hold_len = max(0.5, seg.end_time - seg.start_time)
                 if idx == 0 and seg.pose_label.startswith("Intro"):
                     clip_start = max(0.0, seg.start_time)
                     if clip_start + slot_duration > src_duration - 0.1:
                         clip_start = max(0.0, src_duration - slot_duration - 0.1)
                 elif slot_duration <= hold_len:
-                    # Le créneau musical tient entièrement dans la pose verrouillée :
-                    # On centre parfaitement la coupe à l'intérieur du plateau de contraction !
                     margin = (hold_len - slot_duration) / 2.0
                     clip_start = seg.start_time + margin
                 else:
-                    # Si le créneau est plus long que la pose, on cale le début dès le verrouillage
                     clip_start = max(0.0, seg.start_time)
                     if clip_start + slot_duration > src_duration - 0.1:
                         clip_start = max(0.0, src_duration - slot_duration - 0.1)
@@ -143,6 +183,12 @@ class SpeedRampVideoEditor:
                     start_sec=clip_start,
                     duration_sec=slot_duration,
                     crop_expr=crop_expr,
+                    target_w=target_w,
+                    target_h=target_h,
+                    enable_beat_flash=enable_beat_flash,
+                    enable_zoom_pulse=enable_zoom_pulse,
+                    enable_rgb_split=enable_rgb_split,
+                    is_first_part=(idx == 0),
                 )
                 fast_f, slow_f = 1.0, 1.0
             else:
@@ -172,6 +218,11 @@ class SpeedRampVideoEditor:
                     crop_expr=crop_expr,
                     temp_dir=temp_dir,
                     part_idx=idx,
+                    target_w=target_w,
+                    target_h=target_h,
+                    enable_beat_flash=enable_beat_flash,
+                    enable_zoom_pulse=enable_zoom_pulse,
+                    enable_rgb_split=enable_rgb_split,
                 )
                 fast_f, slow_f = fast_speed_factor, slow_speed_factor
 
@@ -216,12 +267,34 @@ class SpeedRampVideoEditor:
         start_sec: float,
         duration_sec: float,
         crop_expr: str,
+        target_w: int = 1080,
+        target_h: int = 1920,
+        enable_beat_flash: bool = False,
+        enable_zoom_pulse: bool = False,
+        enable_rgb_split: bool = False,
+        is_first_part: bool = False,
     ) -> None:
         """
         Découpe un sous-plan à vitesse réelle 1.0x avec rognage centré exact (`crop_expr`)
-        et cadence d'images constante (`fps=30`), sans aucun étirement.
+        et cadence d'images constante (`fps=30`), sans aucun étirement, et application optionnelle
+        des effets d'impact CapCut (Flash blanc, Zoom Punch, RGB Split).
         """
-        vf = f"{crop_expr},fps={self.target_fps},format=yuv420p"
+        fx_filters = [crop_expr]
+        if not is_first_part:
+            if enable_zoom_pulse:
+                fx_filters.append(
+                    f"zoompan=z='if(lt(on,7),1.06-0.06*(on/7),1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={target_w}x{target_h}:fps={self.target_fps}"
+                )
+            if enable_rgb_split:
+                fx_filters.append("rgbashift=rh=6:bh=-6:enable='between(t,0,0.07)'")
+            if enable_beat_flash:
+                fx_filters.append(
+                    "eq=brightness='if(lt(t,0.12),0.30*(1-t/0.12),0)':contrast='if(lt(t,0.12),1.2*(1-t/0.12)+1.0,1.0)'"
+                )
+
+        fx_filters.extend([f"fps={self.target_fps}", "format=yuv420p"])
+        vf = ",".join(fx_filters)
+
         cmd = [
             "ffmpeg",
             "-y",
@@ -261,8 +334,13 @@ class SpeedRampVideoEditor:
         crop_expr: str,
         temp_dir: Path,
         part_idx: int,
+        target_w: int = 1080,
+        target_h: int = 1920,
+        enable_beat_flash: bool = False,
+        enable_zoom_pulse: bool = False,
+        enable_rgb_split: bool = False,
     ) -> None:
-        """Génère un plan en deux phases (approche rapide + ralenti sur le beat drop)."""
+        """Génère un plan en deux phases (approche rapide + ralenti sur le beat drop avec FX)."""
         fast_part = temp_dir / f"sub_{part_idx:03d}_fast.mp4"
         slow_part = temp_dir / f"sub_{part_idx:03d}_slow.mp4"
 
@@ -299,7 +377,20 @@ class SpeedRampVideoEditor:
         )
 
         src_slow_dur = slow_tl_dur * slow_factor
-        vf_slow = f"{crop_expr},setpts={1.0 / slow_factor:.4f}*PTS,fps={self.target_fps},format=yuv420p"
+        slow_filters = [crop_expr, f"setpts={1.0 / slow_factor:.4f}*PTS"]
+        if enable_zoom_pulse:
+            slow_filters.append(
+                f"zoompan=z='if(lt(on,7),1.06-0.06*(on/7),1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={target_w}x{target_h}:fps={self.target_fps}"
+            )
+        if enable_rgb_split:
+            slow_filters.append("rgbashift=rh=6:bh=-6:enable='between(t,0,0.07)'")
+        if enable_beat_flash:
+            slow_filters.append(
+                "eq=brightness='if(lt(t,0.12),0.30*(1-t/0.12),0)':contrast='if(lt(t,0.12),1.2*(1-t/0.12)+1.0,1.0)'"
+            )
+        slow_filters.extend([f"fps={self.target_fps}", "format=yuv420p"])
+        vf_slow = ",".join(slow_filters)
+
         subprocess.run(
             [
                 "ffmpeg",
@@ -313,6 +404,145 @@ class SpeedRampVideoEditor:
                 "-an",
                 "-vf",
                 vf_slow,
+                "-t",
+                f"{slow_tl_dur:.3f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "17",
+                "-video_track_timescale",
+                "15360",
+                str(slow_part),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        concat_list = temp_dir / f"sub_{part_idx:03d}.txt"
+        concat_list.write_text(
+            f"file '{fast_part.resolve()}'\nfile '{slow_part.resolve()}'\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_list),
+                "-c",
+                "copy",
+                str(part_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def _render_velocity_breath_divinity_part(
+        self,
+        src_path: Path,
+        part_path: Path,
+        pre_start: float,
+        peak_ts: float,
+        fast_tl_dur: float,
+        slow_tl_dur: float,
+        fast_factor: float,
+        slow_factor: float,
+        crop_expr: str,
+        temp_dir: Path,
+        part_idx: int,
+        target_w: int,
+        target_h: int,
+        enable_beat_flash: bool = True,
+        enable_zoom_pulse: bool = True,
+        enable_rgb_split: bool = True,
+        enable_motion_blur: bool = True,
+    ) -> None:
+        """
+        Génère un plan dans le style signature 'Breath Divinity' / CapCut Velocity :
+          1. Phase d'amorce ultra-rapide (2.2x) avec flou cinématique (motion blur/tblend)
+          2. Impact synchronisé au Beat Drop avec effets CapCut :
+             - Flash blanc percutant (Impact Flash)
+             - Zoom Punch dynamique (Bass Shake)
+             - Micro-aberration chromatique (RGB Split)
+          3. Maintien au ralenti (0.55x) sur le plateau de contraction isométrique verrouillé.
+        """
+        fast_part = temp_dir / f"sub_{part_idx:03d}_fast.mp4"
+        slow_part = temp_dir / f"sub_{part_idx:03d}_slow.mp4"
+
+        src_fast_dur = fast_tl_dur * fast_factor
+        fast_filters = [crop_expr, f"setpts={1.0 / fast_factor:.4f}*PTS", f"fps={self.target_fps}"]
+        if enable_motion_blur:
+            fast_filters.append("tblend=all_mode=average")
+        fast_filters.append("format=yuv420p")
+
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{pre_start:.3f}",
+                "-t",
+                f"{src_fast_dur:.3f}",
+                "-i",
+                str(src_path),
+                "-an",
+                "-vf",
+                ",".join(fast_filters),
+                "-t",
+                f"{fast_tl_dur:.3f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "17",
+                "-video_track_timescale",
+                "15360",
+                str(fast_part),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        src_slow_dur = slow_tl_dur * slow_factor
+        slow_filters = [crop_expr, f"setpts={1.0 / slow_factor:.4f}*PTS"]
+
+        # Effets CapCut d'impact sur le beat drop
+        if enable_zoom_pulse:
+            slow_filters.append(
+                f"zoompan=z='if(lt(on,7),1.06-0.06*(on/7),1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={target_w}x{target_h}:fps={self.target_fps}"
+            )
+        if enable_rgb_split:
+            slow_filters.append("rgbashift=rh=6:bh=-6:enable='between(t,0,0.07)'")
+        if enable_beat_flash:
+            slow_filters.append(
+                "eq=brightness='if(lt(t,0.12),0.30*(1-t/0.12),0)':contrast='if(lt(t,0.12),1.2*(1-t/0.12)+1.0,1.0)'"
+            )
+
+        slow_filters.extend([f"fps={self.target_fps}", "format=yuv420p"])
+
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{peak_ts:.3f}",
+                "-t",
+                f"{src_slow_dur:.3f}",
+                "-i",
+                str(src_path),
+                "-an",
+                "-vf",
+                ",".join(slow_filters),
                 "-t",
                 f"{slow_tl_dur:.3f}",
                 "-c:v",

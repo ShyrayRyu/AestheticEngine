@@ -17,20 +17,44 @@
 
 ---
 
-## Démarrage Rapide (Docker / Linux / LXC)
+## 🚀 Démarrage Rapide
 
-1. **Vérifier qu'Ollama tourne sur la machine hôte** avec le modèle LLaVA :
-   ```bash
-   ollama pull llava:latest
-   OLLAMA_HOST=0.0.0.0:11434 ollama serve
-   ```
+### Option 1 : Windows 11 (1-Clic)
+- **Directement depuis l'explorateur** : Double-cliquez sur `start.bat`
+- **Ou via PowerShell** :
+  ```powershell
+  .\start.ps1
+  ```
+*Le script configure automatiquement le venv Python, installe les dépendances frontend/backend, vérifie Ollama et lance le studio web.*
 
-2. **Lancer la stack complète avec Docker Compose** :
-   ```bash
-   cp .env.example .env
-   docker compose up --build -d
-   ```
+### Option 2 : Ubuntu / Debian / Linux
+```bash
+chmod +x start.sh
+./start.sh
+```
+*Gère automatiquement Python 3, le gestionnaire JS (Bun/NPM), FFmpeg, Ollama et lance les deux serveurs en arrière-plan avec arrêt propre (Ctrl+C).*
 
-3. **Accéder à l'application** :
-   - **Studio Web Vue 3** : `http://localhost:5173`
-   - **Documentation Swagger FastAPI** : `http://localhost:8000/docs`
+### Option 3 : Universel (Cross-Platform Python)
+```bash
+python start.py
+```
+
+### Option 4 : Docker & Docker Compose
+```bash
+docker compose up --build -d
+```
+
+---
+
+## 🌐 Liens d'accès :
+- **Studio Web (Frontend Vue 3)** : `http://localhost:5173`
+- **Documentation Swagger FastAPI** : `http://localhost:8000/docs`
+
+---
+
+## 🤖 Modèle d'IA Vision Locale (Ollama)
+Pour profiter de l'évaluation automatique de l'effort physique et des poses via IA :
+```bash
+ollama pull llava:latest
+ollama serve
+```
